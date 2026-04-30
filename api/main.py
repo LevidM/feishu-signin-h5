@@ -48,6 +48,7 @@ from flask import Flask, request, jsonify, send_from_directory, abort
 from flask_cors import CORS
 from dotenv import load_dotenv
 import httpx
+import threading
 
 # 加载环境变量
 load_dotenv()
@@ -902,7 +903,15 @@ def signin():
         if time_field_name and update_time:
             update_fields[time_field_name] = datetime.now().timestamp() * 1000  # 毫秒
 
-        feishu.update_record(bitable_token, table_id, record_id, update_fields)
+        # 异步更新飞书表格（不等 API 返回，签到结果先给用户）
+        if update_fields:
+            def _do_update():
+                try:
+                    feishu.update_record(bitable_token, table_id, record_id, update_fields)
+                    logger.info(f"签到记录已更新: {record_id}")
+                except Exception as e:
+                    logger.error(f"签到记录更新失败: {e}")
+            threading.Thread(target=_do_update, daemon=True).start()
 
         logger.info(f"签到成功: 手机号 {phone}, 记录 {record_id}")
 
