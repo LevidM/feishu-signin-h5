@@ -190,7 +190,7 @@ class FeishuClient:
             url=url,
             headers=headers,
             **kwargs,
-            timeout=30.0
+            timeout=5.0
         )
 
         data = response.json()
@@ -332,9 +332,9 @@ def get_cached_config(bitable_token: str) -> Optional[dict]:
 
 
 def set_cached_config(bitable_token: str, config: dict):
-    """缓存配置（5分钟过期）"""
+    """缓存配置（1小时后过期，减少飞书 API 调用）"""
     cache_key = f"config_{bitable_token}"
-    cache.set(cache_key, config, ttl_seconds=300)
+    cache.set(cache_key, config, ttl_seconds=3600)
 
 
 def extract_phone_values(value) -> list:
@@ -716,7 +716,8 @@ def signin():
         seat_field_id = config.get("seat_field_id")
         seat_field_name = config.get("seat_field_name")
 
-        # 使用搜索API加速（page_size=1，只查一条，避免全量扫描）
+        # 搜索报名记录（精确搜索，只查一条）
+        matched_records = []
         if phone_field_name:
             try:
                 normalized_phone = phone.replace(" ", "").replace("-", "")
@@ -729,29 +730,7 @@ def signin():
                     page_size=1
                 )
             except Exception as e:
-                logger.warning(f"搜索API失败，降级到全量获取: {e}")
-                matched_records = []
-        else:
-            matched_records = []
-
-        # 如果搜索没找到，降级到全量获取（字段名作为 key）
-        if not matched_records and phone_field_name:
-            logger.info("使用全量获取降级")
-            all_records = feishu.get_records(bitable_token, table_id)
-            normalized_phone = phone.replace(" ", "").replace("-", "")
-
-            for record in all_records:
-                fields_data = record.get("fields", {})
-                phone_value = fields_data.get(phone_field_name)  # 用字段名
-                if phone_value:
-                    phone_list = extract_phone_values(phone_value)
-                    for p in phone_list:
-                        p_normalized = p.replace(" ", "").replace("-", "")
-                        if p_normalized.endswith(normalized_phone) or normalized_phone.endswith(p_normalized):
-                            matched_records.append(record)
-                            break
-                if matched_records:
-                    break
+                logger.error(f"搜索记录失败: {e}")
 
         # 未找到报名记录（返回报名链接）
         if not matched_records:
