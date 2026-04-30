@@ -37,13 +37,25 @@
 
     body {
       font-family: -apple-system, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
-      background: linear-gradient(135deg, #1a3a8f 0%, #0c1d4d 100%);
+      background: #f0ebe3;
       min-height: 100dvh;
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 16px;
       -webkit-font-smoothing: antialiased;
+      position: relative;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: radial-gradient(ellipse at 50% 30%, rgba(200,180,160,0.20) 0%, transparent 60%);
+      pointer-events: none;
     }
 
     .container {
@@ -68,7 +80,7 @@
       width: 48px;
       height: 48px;
       margin: 0 auto 12px;
-      background: var(--blue-light);
+      background: linear-gradient(135deg, var(--blue-light), #d6e4ff);
       border-radius: 10px;
       display: flex;
       align-items: center;
@@ -329,7 +341,7 @@
 
     .footer p {
       font-size: 12px;
-      color: var(--text-tertiary);
+      color: #b8aba0;
     }
 
     /* ── Loading overlay ── */
@@ -428,10 +440,9 @@
                 type="tel"
                 id="phone"
                 placeholder="请输入手机号"
-                maxlength="11"
+                maxlength="16"
                 autocomplete="tel"
-                inputmode="numeric"
-                pattern="[0-9]*"
+                inputmode="tel"
               />
             </div>
             <div id="hint" class="hint"></div>
@@ -472,10 +483,15 @@
     const footer = document.getElementById('tableName');
 
     // ── Validation ──
+    const cleanPhone = (v) => v.trim().replace(/[\s\-()]+/g, '');
+    const isDigits = (v) => /^\+?\d+$/.test(v);
+
     const vMsg = (v) => {
-      if (!v.trim()) return '请输入手机号码';
-      if (!/^\d+$/.test(v.trim())) return '手机号只能包含数字';
-      if (v.trim().length < 7) return '手机号格式不正确';
+      const cleaned = cleanPhone(v);
+      if (!cleaned) return '请输入手机号码';
+      if (!isDigits(cleaned)) return '手机号格式不正确';
+      if (cleaned.length < 7) return '手机号位数不足';
+      if (cleaned.length > 15) return '手机号过长';
       return '';
     };
 
@@ -495,7 +511,7 @@
     input.addEventListener('input', () => {
       const err = vMsg(input.value);
       if (err) showHint(err, 'error');
-      else if (input.value.trim().length >= 7) showHint('✓', 'success');
+      else if (cleanPhone(input.value).length >= 7) showHint('手机号格式正确', 'success');
       else clearHint();
     });
 
@@ -583,8 +599,8 @@
       e.preventDefault();
       if (submitting) return;
 
-      const phone = input.value.trim();
-      const err = vMsg(phone);
+      const phone = cleanPhone(input.value);
+      const err = vMsg(input.value);
       if (err) { showHint(err, 'error'); input.focus(); return; }
 
       submitting = true;
@@ -616,7 +632,7 @@
 
     input.addEventListener('paste', () => {
       setTimeout(() => {
-        if (!vMsg(input.value) && input.value.trim().length >= 7) form.requestSubmit();
+        if (!vMsg(input.value) && cleanPhone(input.value).length >= 7) form.requestSubmit();
       }, 50);
     });
   </script>
