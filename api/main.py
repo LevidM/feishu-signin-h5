@@ -519,8 +519,13 @@ def detect_form_url(bitable_token: str, table_id: str, table_name: str = "") -> 
             vt = view.get("view_type")
             if vt == "form" or vt == 3 or view.get("type") == 3:
                 view_id = view["view_id"]
-                # 构造表单 URL（外部用户可能需开启"链接无需登录"）
-                return f"https://bytedance.feishu.cn/base/{bitable_token}/form/{view_id}"
+                # 标准 Feishu URL 格式：指定 table 和 view
+                return f"https://bytedance.feishu.cn/base/{bitable_token}?table={table_id}&view={view_id}"
+            # 容错：视图名包含"报名"也视为表单
+            if vt == "grid" and "报名" in view.get("view_name", ""):
+                view_id = view["view_id"]
+                logger.info(f"按名称匹配到报名表单: {view.get('view_name')}")
+                return f"https://bytedance.feishu.cn/base/{bitable_token}?table={table_id}&view={view_id}"
     except Exception as e:
         logger.warning(f"检测表单视图失败: {e}")
     return ""
