@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1677ff">
+  <title>现场签到</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 420px;
+    }
+
+    .card {
+      background: #ffffff;
+      border-radius: 24px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+      overflow: hidden;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #1677ff 0%, #4096ff 100%);
+      padding: 40px 30px;
+      text-align: center;
+      color: white;
+    }
+
+    .header-icon {
+      width: 80px;
+      height: 80px;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 20px;
+      font-size: 40px;
+    }
+
+    .header h1 {
+      font-size: 28px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .header p {
+      opacity: 0.9;
+      font-size: 14px;
+    }
+
+    .content {
+      padding: 30px;
+    }
+
+    .form-group {
+      margin-bottom: 24px;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 8px;
+    }
+
+    .input-wrapper {
+      position: relative;
+    }
+
+    .input-wrapper input {
+      width: 100%;
+      padding: 16px 20px;
+      font-size: 18px;
+      border: 2px solid #e8e8e8;
+      border-radius: 12px;
+      outline: none;
+      transition: all 0.3s ease;
+      text-align: center;
+      letter-spacing: 2px;
+    }
+
+    .input-wrapper input:focus {
+      border-color: #1677ff;
+      box-shadow: 0 0 0 4px rgba(22, 119, 255, 0.1);
+    }
+
+    .btn {
+      width: 100%;
+      padding: 16px;
+      font-size: 18px;
+      font-weight: 600;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #1677ff 0%, #4096ff 100%);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 25px rgba(22, 119, 255, 0.35);
+    }
+
+    .btn-primary:active {
+      transform: translateY(0);
+    }
+
+    .btn-primary:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .result {
+      margin-top: 30px;
+      padding: 24px;
+      border-radius: 16px;
+      text-align: center;
+      display: none;
+    }
+
+    .result.show {
+      display: block;
+      animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .result-success {
+      background: #f6ffed;
+      border: 2px solid #b7eb8f;
+    }
+
+    .result-success .icon {
+      color: #52c41a;
+      font-size: 48px;
+      margin-bottom: 12px;
+    }
+
+    .result-already {
+      background: #fff7e6;
+      border: 2px solid #ffd591;
+    }
+
+    .result-already .icon {
+      color: #fa8c16;
+      font-size: 48px;
+      margin-bottom: 12px;
+    }
+
+    .result-error {
+      background: #fff2f0;
+      border: 2px solid #ffccc7;
+    }
+
+    .result-error .icon {
+      color: #ff4d4f;
+      font-size: 48px;
+      margin-bottom: 12px;
+    }
+
+    .result h3 {
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+
+    .result p {
+      color: #666;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .result .name {
+      font-size: 24px;
+      font-weight: 600;
+      color: #333;
+      margin: 12px 0;
+    }
+
+    .result .seat {
+      font-size: 20px;
+      color: #1677ff;
+      margin: 8px 0;
+      padding: 8px 16px;
+      background: #e6f7ff;
+      border-radius: 8px;
+      display: inline-block;
+    }
+
+    .result .time {
+      font-size: 14px;
+      color: #999;
+      margin-top: 8px;
+    }
+
+    .footer {
+      text-align: center;
+      padding: 20px;
+      color: #999;
+      font-size: 12px;
+    }
+
+    .loading {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .loading.show {
+      display: flex;
+    }
+
+    .spinner {
+      width: 50px;
+      height: 50px;
+      border: 4px solid #f3f3f3;
+      border-top: 4px solid #1677ff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .api-status {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      z-index: 100;
+    }
+
+    .api-status.connected {
+      background: #f6ffed;
+      color: #52c41a;
+    }
+
+    .api-status.disconnected {
+      background: #fff2f0;
+      color: #ff4d4f;
+    }
+
+    .api-status.checking {
+      background: #e6f7ff;
+      color: #1890ff;
+    }
+
+    /* 隐藏手机端默认样式 */
+    input[type="tel"]::-webkit-outer-spin-button,
+    input[type="tel"]::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <!-- API 状态指示器 -->
+  <div id="apiStatus" class="api-status checking">检查连接...</div>
+
+  <!-- 加载中遮罩 -->
+  <div id="loading" class="loading">
+    <div class="spinner"></div>
+  </div>
+
+  <div class="container">
+    <div class="card">
+      <div class="header">
+        <div class="header-icon">📋</div>
+        <h1 id="eventTitle">现场签到</h1>
+        <p id="eventDesc">请输入报名时填写的手机号码</p>
+      </div>
+
+      <div class="content">
+        <form id="signinForm">
+          <div class="form-group">
+            <div class="input-wrapper">
+              <input
+                type="tel"
+                id="phone"
+                placeholder="请输入手机号"
+                maxlength="15"
+                required
+                autocomplete="tel"
+              />
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary" id="submitBtn">
+            立即签到
+          </button>
+        </form>
+
+        <div id="result" class="result"></div>
+      </div>
+
+      <div class="footer">
+        <p id="tableName">如有疑问，请联系现场工作人员</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ============ 配置 ============
+    const API_BASE = window.location.origin;
+    
+    // 从URL参数获取 bitable_token
+    const urlParams = new URLSearchParams(window.location.search);
+    const BITABLE_TOKEN = urlParams.get('app') || '';
+
+    // DOM 元素
+    const form = document.getElementById('signinForm');
+    const phoneInput = document.getElementById('phone');
+    const submitBtn = document.getElementById('submitBtn');
+    const resultDiv = document.getElementById('result');
+    const loadingDiv = document.getElementById('loading');
+    const apiStatus = document.getElementById('apiStatus');
+    const eventTitle = document.getElementById('eventTitle');
+    const eventDesc = document.getElementById('eventDesc');
+    const tableName = document.getElementById('tableName');
+
+    // ============ 初始化 ============
+    async function init() {
+      // 如果有 bitable_token，先加载配置
+      if (BITABLE_TOKEN) {
+        await loadConfig();
+      }
+      
+      // 检查 API 连接
+      await checkApiConnection();
+      
+      // 聚焦手机号输入框
+      phoneInput.focus();
+    }
+
+    // 加载表格配置
+    async function loadConfig() {
+      try {
+        const response = await fetch(`${API_BASE}/api/config`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bitable_token: BITABLE_TOKEN })
+        });
+
+        const data = await response.json();
+        
+        if (data.success) {
+          // 更新页面标题
+          if (data.table_name) {
+            eventTitle.textContent = data.table_name;
+            tableName.textContent = `数据表: ${data.table_name}`;
+          }
+        }
+      } catch (error) {
+        console.error('加载配置失败:', error);
+      }
+    }
+
+    // ============ 功能函数 ============
+
+    // 显示/隐藏加载
+    function showLoading() {
+      loadingDiv.classList.add('show');
+      submitBtn.disabled = true;
+    }
+
+    function hideLoading() {
+      loadingDiv.classList.remove('show');
+      submitBtn.disabled = false;
+    }
+
+    // 显示结果
+    function showResult(status, message, name, seat, firstTime) {
+      let icon, title, className;
+
+      switch (status) {
+        case 'success':
+          icon = '✓';
+          title = '签到成功';
+          className = 'result-success';
+          break;
+        case 'already':
+          icon = '⏰';
+          title = '已签到';
+          className = 'result-already';
+          break;
+        case 'not_found':
+          icon = '❓';
+          title = '未找到报名信息';
+          className = 'result-error';
+          break;
+        default:
+          icon = '❌';
+          title = '签到失败';
+          className = 'result-error';
+      }
+
+      let html = `<div class="icon">${icon}</div>`;
+      html += `<h3>${title}</h3>`;
+      html += `<p>${message}</p>`;
+
+      if (name) {
+        html += `<div class="name">${name}</div>`;
+      }
+
+      // 显示座位信息
+      if (seat) {
+        html += `<div class="seat">座位: ${seat}</div>`;
+      }
+
+      if (firstTime) {
+        html += `<div class="time">首次签到时间: ${firstTime}</div>`;
+      }
+
+      resultDiv.className = `result show ${className}`;
+      resultDiv.innerHTML = html;
+
+      // 成功或已签到时隐藏表单
+      if (status === 'success' || status === 'already') {
+        form.style.display = 'none';
+      }
+    }
+
+    // 检查 API 连接
+    async function checkApiConnection() {
+      try {
+        apiStatus.className = 'api-status checking';
+        apiStatus.textContent = '检查连接...';
+
+        const response = await fetch(`${API_BASE}/health`, {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' }
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'ok') {
+          apiStatus.className = 'api-status connected';
+          apiStatus.textContent = '系统正常';
+          return true;
+        } else {
+          apiStatus.className = 'api-status disconnected';
+          apiStatus.textContent = '系统异常';
+          return false;
+        }
+      } catch (error) {
+        console.error('API 连接检查失败:', error);
+        apiStatus.className = 'api-status disconnected';
+        apiStatus.textContent = '连接失败';
+        return false;
+      }
+    }
+
+    // 提交签到
+    async function handleSubmit(e) {
+      e.preventDefault();
+
+      const phone = phoneInput.value.trim();
+
+      if (!phone || phone.length < 7) {
+        showResult('error', '请输入正确的手机号码');
+        return;
+      }
+
+      showLoading();
+
+      try {
+        const response = await fetch(`${API_BASE}/api/signin`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ 
+            phone,
+            bitable_token: BITABLE_TOKEN
+          })
+        });
+
+        const data = await response.json();
+
+        hideLoading();
+        showResult(
+          data.status,
+          data.message,
+          data.name,
+          data.seat,
+          data.first_signin_time
+        );
+      } catch (error) {
+        console.error('签到请求失败:', error);
+        hideLoading();
+        showResult('error', '网络错误，请检查网络后重试');
+      }
+    }
+
+    // ============ 事件监听 ============
+    form.addEventListener('submit', handleSubmit);
+
+    // 页面加载时初始化
+    init();
+  </script>
+</body>
+</html>
