@@ -813,7 +813,7 @@ def signin():
             # 构建字段映射（同时存 ID 和名称，飞书 search API 需要传字段名称）
             field_map = {f["field_name"]: f["field_id"] for f in fields}
             phone_field_id = phone_field_name = None
-            status_field_id = status_field_name = status_option_id = None
+            status_field_id = status_field_name = None
             time_field_id = time_field_name = None
             name_field_id = name_field_name = None
             seat_field_id = seat_field_name = None
@@ -828,17 +828,6 @@ def signin():
                 elif "签到状态" in name or "status" in name_lower:
                     status_field_id = fid
                     status_field_name = name
-                    # 单选项需要传选项 ID，尝试多种方式提取"已签到"选项
-                    prop = field.get("property") or {}
-                    opts = prop.get("options") or prop.get("option") or []
-                    for opt in opts:
-                        opt_name = (opt.get("name") or opt.get("text") or "").strip()
-                        if "已签到" in opt_name:
-                            status_option_id = opt.get("id") or opt.get("option_id")
-                            logger.info(f"检测到签到状态选项: name={opt_name}, id={status_option_id}")
-                            break
-                    if not status_option_id:
-                        logger.warning(f"未找到已签到选项，字段属性: {prop}")
                 elif "签到时间" in name or "time" in name_lower:
                     time_field_id = fid
                     time_field_name = name
@@ -857,7 +846,6 @@ def signin():
                 "phone_field_name": phone_field_name,
                 "status_field_id": status_field_id,
                 "status_field_name": status_field_name,
-                "status_option_id": status_option_id,
                 "time_field_id": time_field_id,
                 "time_field_name": time_field_name,
                 "name_field_id": name_field_id,
@@ -883,7 +871,6 @@ def signin():
         phone_field_name = config.get("phone_field_name")
         status_field_id = config.get("status_field_id")
         status_field_name = config.get("status_field_name")
-        status_option_id = config.get("status_option_id")
         time_field_id = config.get("time_field_id")
         time_field_name = config.get("time_field_name")
         name_field_id = config.get("name_field_id")
@@ -950,23 +937,7 @@ def signin():
         update_fields = {}
 
         if status_field_name and update_status:
-            # 单选项用选项 ID，否则实时查询字段详情获取
-            if not status_option_id:
-                field_detail = feishu.get_field(bitable_token, table_id, status_field_id)
-                for opt in (field_detail.get("property") or {}).get("options", []):
-                    opt_name = (opt.get("name") or opt.get("text") or "").strip()
-                    if "已签到" in opt_name:
-                        status_option_id = opt.get("id") or opt.get("option_id")
-                        logger.info(f"查到签到状态选项: {opt_name} -> {status_option_id}")
-                        # 缓存查询结果，后续签到不再查字段
-                        config["status_option_id"] = status_option_id
-                        set_cached_config(bitable_token, config)
-                        break
-            if status_option_id:
-                update_fields[status_field_name] = status_option_id
-            else:
-                logger.warning("未找到已签到选项 ID，直接使用文本")
-                update_fields[status_field_name] = "已签到"
+            update_fields[status_field_name] = "已签到"
 
         if time_field_name and update_time:
             update_fields[time_field_name] = datetime.now().timestamp() * 1000  # 毫秒
