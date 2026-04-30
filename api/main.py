@@ -37,6 +37,8 @@ import os
 import time
 import logging
 import re
+import json
+import uuid
 from datetime import datetime, timedelta
 from functools import wraps
 from typing import Optional, Tuple, Dict, List
@@ -48,6 +50,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 import httpx
+import redis
 
 load_dotenv()
 
@@ -65,6 +68,11 @@ FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 SIGNIN_BASE_URL = os.getenv("SIGNIN_BASE_URL", "").rstrip("/")
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+CACHE_BACKEND = os.getenv("CACHE_BACKEND", "auto").strip().lower()
+CONFIG_CACHE_TTL = int(os.getenv("CONFIG_CACHE_TTL", "21600"))
+RECORD_CACHE_TTL = int(os.getenv("RECORD_CACHE_TTL", "21600"))
+MISS_REFRESH_COOLDOWN = int(os.getenv("MISS_REFRESH_COOLDOWN", "60"))
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
@@ -74,10 +82,10 @@ ALLOWED_ORIGINS = [
 if not DEBUG and (not FEISHU_APP_ID or not FEISHU_APP_SECRET):
     raise RuntimeError("生产环境必须配置 FEISHU_APP_ID 和 FEISHU_APP_SECRET")
 
-# ==================== 内存缓存 ====================
+# ==================== 缓存与分布式锁 ====================
 
 class MemoryCache:
-    """线程安全的内存缓存（生产环境可替换为 Redis）"""
+    """线程安全的内存缓存（未配置 Redis 时的回退实现）"""
 
     def __init__(self):
         self._data: Dict[str, tuple] = {}  # key -> (value, expire_time)
@@ -101,7 +109,113 @@ class MemoryCache:
             self._data.pop(key, None)
 
 
-cache = MemoryCache()
+class RedisCache:
+    """Redis 缓存，供多 worker / 多进程共享配置和手机号索引。"""
+
+    KEY_PREFIX = "feishu_signin:"
+
+    def __init__(self, redis_url: str):
+        self.client = redis.Redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=10,
+            health_check_interval=30,
+        )
+        self.client.ping()
+
+    def _key(self, key: str) -> str:
+        return f"{self.KEY_PREFIX}{key}"
+
+    def get(self, key: str):
+        raw = self.client.get(self._key(key))
+        if raw is None:
+            return None
+        return json.loads(raw)
+
+    def set(self, key: str, value, ttl_seconds: int = 3600):
+        self.client.setex(
+            self._key(key),
+            ttl_seconds,
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+        )
+
+    def delete(self, key: str):
+        self.client.delete(self._key(key))
+
+
+def create_cache():
+    if CACHE_BACKEND not in ("auto", "memory", "redis"):
+        raise RuntimeError("CACHE_BACKEND 只能是 auto、memory 或 redis")
+    if CACHE_BACKEND in ("auto", "redis") and REDIS_URL:
+        try:
+            redis_cache = RedisCache(REDIS_URL)
+            logger.info("缓存后端: Redis")
+            return redis_cache
+        except Exception as e:
+            if CACHE_BACKEND == "redis":
+                raise RuntimeError(f"Redis 连接失败: {e}") from e
+            logger.warning(f"Redis 连接失败，回退到内存缓存: {e}")
+    logger.info("缓存后端: Memory")
+    return MemoryCache()
+
+
+cache = create_cache()
+
+
+class LockManager:
+    """提供 Redis 分布式锁；未配置 Redis 时回退到进程内锁。"""
+
+    KEY_PREFIX = "feishu_signin:lock:"
+
+    def __init__(self, cache_backend):
+        self.redis_client = cache_backend.client if isinstance(cache_backend, RedisCache) else None
+        self._locks: Dict[str, Lock] = {}
+        self._locks_guard = Lock()
+
+    def _redis_key(self, key: str) -> str:
+        return f"{self.KEY_PREFIX}{key}"
+
+    def acquire(self, key: str, ttl_seconds: int = 30, wait_timeout: float = 0) -> Optional[str]:
+        if self.redis_client:
+            token = uuid.uuid4().hex
+            deadline = time.time() + wait_timeout
+            while True:
+                if self.redis_client.set(self._redis_key(key), token, nx=True, ex=ttl_seconds):
+                    return token
+                if time.time() >= deadline:
+                    return None
+                time.sleep(0.05)
+
+        lock = self._get_memory_lock(key)
+        if wait_timeout > 0:
+            acquired = lock.acquire(timeout=wait_timeout)
+        else:
+            acquired = lock.acquire(blocking=False)
+        return "memory" if acquired else None
+
+    def release(self, key: str, token: str):
+        if not token:
+            return
+        if self.redis_client:
+            script = """
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("del", KEYS[1])
+            end
+            return 0
+            """
+            self.redis_client.eval(script, 1, self._redis_key(key), token)
+            return
+        self._get_memory_lock(key).release()
+
+    def _get_memory_lock(self, key: str) -> Lock:
+        with self._locks_guard:
+            if key not in self._locks:
+                self._locks[key] = Lock()
+            return self._locks[key]
+
+
+lock_manager = LockManager(cache)
 
 
 class RecordCache:
@@ -115,20 +229,16 @@ class RecordCache:
     """
 
     CACHE_KEY_PREFIX = "idx_"
-    CACHE_TTL = 600  # 10 分钟
-
-    def __init__(self):
-        self._locks: Dict[str, Lock] = {}
-        self._locks_guard = Lock()
-
-    def _get_lock(self, bitable_token: str) -> Lock:
-        with self._locks_guard:
-            if bitable_token not in self._locks:
-                self._locks[bitable_token] = Lock()
-            return self._locks[bitable_token]
+    CACHE_TTL = RECORD_CACHE_TTL
 
     def _index_key(self, bitable_token: str) -> str:
         return f"{self.CACHE_KEY_PREFIX}{bitable_token}"
+
+    def _lock_key(self, bitable_token: str) -> str:
+        return f"record_index:{bitable_token}"
+
+    def _miss_refresh_key(self, bitable_token: str) -> str:
+        return f"miss_refresh_{bitable_token}"
 
     def _build_index(self, records: list, phone_field_name: str) -> dict:
         index = {}
@@ -159,26 +269,46 @@ class RecordCache:
                         matches.append(item)
         return matches
 
-    def refresh(self, bitable_token: str, table_id: str, phone_field_name: str):
+    def refresh(self, bitable_token: str, table_id: str, phone_field_name: str, force: bool = False):
         """
         全量拉取并重建索引。
         持锁期间若其他线程已刷新完成，直接返回，避免重复拉取（雷劈效应）。
         """
-        lock = self._get_lock(bitable_token)
-        with lock:
+        lock_token = lock_manager.acquire(self._lock_key(bitable_token), ttl_seconds=300, wait_timeout=30)
+        if not lock_token:
+            logger.warning(f"缓存刷新锁获取失败: token={bitable_token}")
+            return
+        try:
             # double-check：等锁成功后再确认是否仍需刷新
-            if cache.get(self._index_key(bitable_token)):
+            if not force and cache.get(self._index_key(bitable_token)):
                 return
-            try:
-                all_records = feishu.get_records(bitable_token, table_id)
-                index = self._build_index(all_records, phone_field_name)
-                cache.set(self._index_key(bitable_token), index, ttl_seconds=self.CACHE_TTL)
-                logger.info(
-                    f"缓存刷新完成: token={bitable_token}, "
-                    f"记录={len(all_records)}, 索引={len(index)}"
-                )
-            except Exception as e:
-                logger.warning(f"缓存刷新失败: token={bitable_token}, error={e}")
+            all_records = feishu.get_records(bitable_token, table_id)
+            index = self._build_index(all_records, phone_field_name)
+            cache.set(self._index_key(bitable_token), index, ttl_seconds=self.CACHE_TTL)
+            logger.info(
+                f"缓存刷新完成: token={bitable_token}, "
+                f"记录={len(all_records)}, 手机号={len(index)}"
+            )
+        except Exception as e:
+            logger.warning(f"缓存刷新失败: token={bitable_token}, error={e}")
+        finally:
+            lock_manager.release(self._lock_key(bitable_token), lock_token)
+
+    def refresh_after_miss(self, bitable_token: str, table_id: str, phone_field_name: str) -> bool:
+        """
+        缓存已有但手机号未命中时，最多每 MISS_REFRESH_COOLDOWN 秒刷新一次。
+        避免输错手机号或未报名手机号反复触发全量拉取。
+        """
+        if not self.has_index(bitable_token):
+            self.refresh(bitable_token, table_id, phone_field_name)
+            return True
+
+        cooldown_key = self._miss_refresh_key(bitable_token)
+        if cache.get(cooldown_key):
+            return False
+        cache.set(cooldown_key, {"at": int(time.time())}, ttl_seconds=MISS_REFRESH_COOLDOWN)
+        self.refresh(bitable_token, table_id, phone_field_name, force=True)
+        return True
 
     def has_index(self, bitable_token: str) -> bool:
         return cache.get(self._index_key(bitable_token)) is not None
@@ -211,24 +341,43 @@ class RecordCache:
 
     def update_record_fields(self, bitable_token: str, phone: str, new_fields: dict):
         """
-        签到成功后立即更新内存缓存中对应记录的字段。
-        持锁保证与 refresh() 之间的可见性，防止并发写 dict。
+        签到成功后立即更新缓存中对应记录的字段。
+        持锁保证与 refresh() 之间的可见性，防止并发覆盖索引。
         """
-        lock = self._get_lock(bitable_token)
-        with lock:
+        lock_token = lock_manager.acquire(self._lock_key(bitable_token), ttl_seconds=30, wait_timeout=5)
+        if not lock_token:
+            logger.warning(f"缓存更新锁获取失败: token={bitable_token}")
+            return
+        try:
             index = cache.get(self._index_key(bitable_token))
             if not index:
                 return
             for record in self._find_all_in_index(index, phone):
                 if record and "fields" in record:
                     record["fields"].update(new_fields)
+            cache.set(self._index_key(bitable_token), index, ttl_seconds=self.CACHE_TTL)
+        finally:
+            lock_manager.release(self._lock_key(bitable_token), lock_token)
 
     def update_record_fields_by_id(self, bitable_token: str, record_id: str, new_fields: dict):
-        lock = self._get_lock(bitable_token)
-        with lock:
-            record = self.find_by_record_id(bitable_token, record_id)
-            if record and "fields" in record:
-                record["fields"].update(new_fields)
+        lock_token = lock_manager.acquire(self._lock_key(bitable_token), ttl_seconds=30, wait_timeout=5)
+        if not lock_token:
+            logger.warning(f"缓存更新锁获取失败: token={bitable_token}")
+            return
+        try:
+            index = cache.get(self._index_key(bitable_token))
+            if not index:
+                return
+            updated = False
+            for records in index.values():
+                for record in records:
+                    if record.get("record_id") == record_id and "fields" in record:
+                        record["fields"].update(new_fields)
+                        updated = True
+            if updated:
+                cache.set(self._index_key(bitable_token), index, ttl_seconds=self.CACHE_TTL)
+        finally:
+            lock_manager.release(self._lock_key(bitable_token), lock_token)
 
 
 record_cache = RecordCache()
@@ -375,19 +524,6 @@ if ALLOWED_ORIGINS:
 elif DEBUG:
     CORS(app)
 
-# 每手机号签到锁：防止同一手机号并发重复提交
-_signin_locks: Dict[str, Lock] = {}
-_signin_locks_guard = Lock()
-
-
-def _get_signin_lock(bitable_token: str, phone: str) -> Lock:
-    key = f"{bitable_token}:{normalize_phone(phone)}"
-    with _signin_locks_guard:
-        if key not in _signin_locks:
-            _signin_locks[key] = Lock()
-        return _signin_locks[key]
-
-
 # ==================== 辅助函数 ====================
 
 def rate_limit_check():
@@ -412,6 +548,10 @@ def is_valid_phone(phone: str) -> bool:
     return bool(re.fullmatch(r"\+?\d{7,15}", normalized))
 
 
+def signin_lock_key(bitable_token: str, phone: str) -> str:
+    return f"signin:{bitable_token}:{normalize_phone(phone)}"
+
+
 def generate_signin_url(bitable_token: str) -> str:
     if not SIGNIN_BASE_URL:
         return f"/?app={bitable_token}"
@@ -423,7 +563,7 @@ def get_cached_config(bitable_token: str) -> Optional[dict]:
 
 
 def set_cached_config(bitable_token: str, config: dict):
-    cache.set(f"config_{bitable_token}", config, ttl_seconds=3600)
+    cache.set(f"config_{bitable_token}", config, ttl_seconds=CONFIG_CACHE_TTL)
 
 
 def extract_phone_values(value) -> list:
@@ -599,7 +739,11 @@ def health_check():
         connected = True
     except Exception as e:
         logger.error(f"飞书连接失败: {e}")
-    return jsonify({"status": "ok" if connected else "degraded", "feishu_connected": connected})
+    return jsonify({
+        "status": "ok" if connected else "degraded",
+        "feishu_connected": connected,
+        "cache_backend": "redis" if isinstance(cache, RedisCache) else "memory",
+    })
 
 
 @app.route("/api/cache/status", methods=["GET"])
@@ -613,6 +757,7 @@ def cache_status():
     index = cache.get(f"idx_{bitable_token}")
     return jsonify({
         "ok": True,
+        "cache_backend": "redis" if isinstance(cache, RedisCache) else "memory",
         "config_cached": bool(config and "fields" in config),
         "records_cached": record_cache.has_index(bitable_token),
         "records_count": record_cache.records_count(bitable_token),
@@ -860,14 +1005,15 @@ def signin():
     request_table_id = data.get("table_id", "").strip()
     selected_record_id = data.get("record_id", "").strip()
 
-    # 同一手机号并发签到防重：非阻塞加锁，重复提交直接拒绝
-    signin_lock = _get_signin_lock(bitable_token, phone)
-    if not signin_lock.acquire(blocking=False):
+    # 同一手机号并发签到防重：Redis 分布式锁可覆盖多个 gunicorn worker。
+    lock_key = signin_lock_key(bitable_token, phone)
+    lock_token = lock_manager.acquire(lock_key, ttl_seconds=120, wait_timeout=0)
+    if not lock_token:
         return error_response("签到请求处理中，请勿重复提交", 429)
     try:
         return _do_signin(phone, bitable_token, request_table_id, selected_record_id)
     finally:
-        signin_lock.release()
+        lock_manager.release(lock_key, lock_token)
 
 
 def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_record_id: str = ""):
@@ -944,12 +1090,12 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
         name_field_name = config.get("name_field_name")
         seat_field_name = config.get("seat_field_name")
 
-        # 查找报名记录：优先内存索引，未命中时全量拉取（含雷劈保护）
+        # 查找报名记录：优先缓存索引；缓存已有但未命中时按冷却时间刷新，避免输错号反复全量拉取。
         matched_records = []
         if phone_field_name:
             matched_records = record_cache.find_all_by_phone(bitable_token, phone)
             if not matched_records:
-                record_cache.refresh(bitable_token, table_id, phone_field_name)
+                record_cache.refresh_after_miss(bitable_token, table_id, phone_field_name)
                 matched_records = record_cache.find_all_by_phone(bitable_token, phone)
 
         if not matched_records:
