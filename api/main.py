@@ -958,6 +958,9 @@ def signin():
                     if "已签到" in opt_name:
                         status_option_id = opt.get("id") or opt.get("option_id")
                         logger.info(f"查到签到状态选项: {opt_name} -> {status_option_id}")
+                        # 缓存查询结果，后续签到不再查字段
+                        config["status_option_id"] = status_option_id
+                        set_cached_config(bitable_token, config)
                         break
             if status_option_id:
                 update_fields[status_field_name] = status_option_id
