@@ -3,327 +3,443 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="theme-color" content="#1677ff">
+  <meta name="theme-color" content="#3370ff">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <title>现场签到</title>
-  <!-- 飞书远程调试 -->
-  <script src='https://lf-package-cn.feishucdn.com/obj/feishu-static/op/fe/devtools_frontend/remote-debug-0.0.1-alpha.6.js'></script>
   <style>
-    * {
+    *, *::before, *::after {
       margin: 0;
       padding: 0;
       box-sizing: border-box;
     }
 
+    :root {
+      --blue: #3370ff;
+      --blue-hover: #2860e8;
+      --blue-light: #f0f5ff;
+      --green: #00b365;
+      --green-light: #e8faf0;
+      --orange: #ff7a00;
+      --orange-light: #fff3e6;
+      --red: #f53f3f;
+      --red-light: #ffecec;
+      --text: #1d2129;
+      --text-secondary: #4e5969;
+      --text-tertiary: #86909c;
+      --border: #e5e6eb;
+      --bg: #f5f6f7;
+      --card: #ffffff;
+      --shadow: 0 2px 8px rgba(0,0,0,0.08);
+      --radius: 8px;
+      --radius-card: 12px;
+      --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
+      font-family: -apple-system, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+      background: linear-gradient(135deg, #1a3a8f 0%, #0c1d4d 100%);
+      min-height: 100dvh;
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 20px;
+      padding: 16px;
+      -webkit-font-smoothing: antialiased;
     }
 
     .container {
       width: 100%;
-      max-width: 420px;
+      max-width: 400px;
     }
 
     .card {
-      background: #ffffff;
-      border-radius: 24px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+      background: var(--card);
+      border-radius: var(--radius-card);
+      box-shadow: var(--shadow);
       overflow: hidden;
     }
 
+    /* ── Header ── */
     .header {
-      background: linear-gradient(135deg, #1677ff 0%, #4096ff 100%);
-      padding: 40px 30px;
+      padding: 32px 24px 20px;
       text-align: center;
-      color: white;
     }
 
     .header-icon {
-      width: 80px;
-      height: 80px;
-      background: rgba(255, 255, 255, 0.2);
+      width: 48px;
+      height: 48px;
+      margin: 0 auto 12px;
+      background: var(--blue-light);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+    }
+
+    .header h1 {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.4;
+    }
+
+    .header p {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+
+    /* ── Content ── */
+    .content {
+      padding: 4px 24px 24px;
+    }
+
+    /* ── Input ── */
+    .form-group {
+      margin-bottom: 0;
+    }
+
+    .input-wrap {
+      position: relative;
+    }
+
+    .input-wrap input {
+      width: 100%;
+      height: 48px;
+      padding: 0 16px;
+      font-size: 16px;
+      font-family: inherit;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      outline: none;
+      text-align: center;
+      letter-spacing: 2px;
+      transition: var(--transition);
+      background: #fff;
+      color: var(--text);
+      caret-color: var(--blue);
+      -moz-appearance: textfield;
+    }
+
+    .input-wrap input::-webkit-outer-spin-button,
+    .input-wrap input::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    .input-wrap input::placeholder {
+      color: var(--text-tertiary);
+      letter-spacing: 0;
+    }
+
+    .input-wrap input:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 2px rgba(51,112,255,0.12);
+    }
+
+    .input-wrap.error input {
+      border-color: var(--red);
+    }
+
+    .input-wrap.error input:focus {
+      box-shadow: 0 0 0 2px rgba(245,63,63,0.12);
+    }
+
+    .input-wrap.success input {
+      border-color: var(--green);
+    }
+
+    .hint {
+      display: none;
+      font-size: 12px;
+      margin-top: 6px;
+      padding-left: 2px;
+      animation: hintIn 0.15s ease-out;
+    }
+
+    @keyframes hintIn {
+      from { opacity: 0; transform: translateY(-2px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .hint.show { display: block; }
+    .hint.error { color: var(--red); }
+    .hint.success { color: var(--green); }
+
+    /* ── Button ── */
+    .btn {
+      width: 100%;
+      height: 44px;
+      margin-top: 20px;
+      font-size: 15px;
+      font-weight: 500;
+      font-family: inherit;
+      border: none;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: var(--transition);
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .btn-primary {
+      background: var(--blue);
+      color: #fff;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: var(--blue-hover);
+    }
+
+    .btn-primary:active:not(:disabled) {
+      transform: scale(0.98);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn .spinner {
+      display: none;
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.35);
+      border-top-color: #fff;
+      border-radius: 50%;
+    }
+
+    .btn.loading .spinner {
+      display: inline-block;
+      animation: spin 0.6s linear infinite;
+    }
+
+    .btn.loading .btn-text {
+      opacity: 0.7;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* ── Result ── */
+    .result {
+      display: none;
+      margin-top: 20px;
+      padding: 20px;
+      border-radius: var(--radius);
+      text-align: center;
+      animation: resultIn 0.3s ease-out;
+    }
+
+    @keyframes resultIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .result.show { display: block; }
+
+    .result .icon {
+      width: 44px;
+      height: 44px;
+      margin: 0 auto 10px;
       border-radius: 50%;
       display: flex;
       align-items: center;
       justify-content: center;
-      margin: 0 auto 20px;
-      font-size: 40px;
-    }
-
-    .header h1 {
-      font-size: 28px;
-      font-weight: 600;
-      margin-bottom: 8px;
-    }
-
-    .header p {
-      opacity: 0.9;
-      font-size: 14px;
-    }
-
-    .content {
-      padding: 30px;
-    }
-
-    .form-group {
-      margin-bottom: 24px;
-    }
-
-    .form-group label {
-      display: block;
-      font-size: 14px;
-      color: #666;
-      margin-bottom: 8px;
-    }
-
-    .input-wrapper {
-      position: relative;
-    }
-
-    .input-wrapper input {
-      width: 100%;
-      padding: 16px 20px;
-      font-size: 18px;
-      border: 2px solid #e8e8e8;
-      border-radius: 12px;
-      outline: none;
-      transition: all 0.3s ease;
-      text-align: center;
-      letter-spacing: 2px;
-    }
-
-    .input-wrapper input:focus {
-      border-color: #1677ff;
-      box-shadow: 0 0 0 4px rgba(22, 119, 255, 0.1);
-    }
-
-    .btn {
-      width: 100%;
-      padding: 16px;
-      font-size: 18px;
-      font-weight: 600;
-      border: none;
-      border-radius: 12px;
-      cursor: pointer;
-      transition: all 0.3s ease;
-    }
-
-    .btn-primary {
-      background: linear-gradient(135deg, #1677ff 0%, #4096ff 100%);
-      color: white;
-    }
-
-    .btn-primary:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 8px 25px rgba(22, 119, 255, 0.35);
-    }
-
-    .btn-primary:active {
-      transform: translateY(0);
-    }
-
-    .btn-primary:disabled {
-      background: #ccc;
-      cursor: not-allowed;
-      transform: none;
-      box-shadow: none;
-    }
-
-    .result {
-      margin-top: 30px;
-      padding: 24px;
-      border-radius: 16px;
-      text-align: center;
-      display: none;
-    }
-
-    .result.show {
-      display: block;
-      animation: fadeIn 0.3s ease;
-    }
-
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(10px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    .result-success {
-      background: #f6ffed;
-      border: 2px solid #b7eb8f;
-    }
-
-    .result-success .icon {
-      color: #52c41a;
-      font-size: 48px;
-      margin-bottom: 12px;
-    }
-
-    .result-already {
-      background: #fff7e6;
-      border: 2px solid #ffd591;
-    }
-
-    .result-already .icon {
-      color: #fa8c16;
-      font-size: 48px;
-      margin-bottom: 12px;
-    }
-
-    .result-error {
-      background: #fff2f0;
-      border: 2px solid #ffccc7;
-    }
-
-    .result-error .icon {
-      color: #ff4d4f;
-      font-size: 48px;
-      margin-bottom: 12px;
+      font-size: 20px;
     }
 
     .result h3 {
-      font-size: 20px;
-      margin-bottom: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 4px;
     }
 
     .result p {
-      color: #666;
-      font-size: 14px;
-      line-height: 1.6;
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.5;
     }
 
     .result .name {
-      font-size: 24px;
+      font-size: 22px;
       font-weight: 600;
-      color: #333;
-      margin: 12px 0;
+      color: var(--text);
+      margin-top: 10px;
     }
 
     .result .seat {
-      font-size: 20px;
-      color: #1677ff;
-      margin: 8px 0;
-      padding: 8px 16px;
-      background: #e6f7ff;
-      border-radius: 8px;
       display: inline-block;
+      margin-top: 8px;
+      padding: 4px 14px;
+      background: var(--blue-light);
+      color: var(--blue);
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
     }
 
     .result .time {
-      font-size: 14px;
-      color: #999;
-      margin-top: 8px;
-    }
-
-    .footer {
-      text-align: center;
-      padding: 20px;
-      color: #999;
       font-size: 12px;
+      color: var(--text-tertiary);
+      margin-top: 6px;
     }
 
-    .loading {
+    /* Result variants */
+    .result-success { background: var(--green-light); }
+    .result-success .icon { background: rgba(0,179,101,0.12); color: var(--green); }
+
+    .result-already { background: var(--orange-light); }
+    .result-already .icon { background: rgba(255,122,0,0.12); color: var(--orange); }
+
+    .result-error { background: var(--red-light); }
+    .result-error .icon { background: rgba(245,63,63,0.12); color: var(--red); }
+
+    /* Register link */
+    .result .register-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 14px;
+      padding: 9px 22px;
+      background: var(--blue);
+      color: #fff;
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-weight: 500;
+      text-decoration: none;
+      transition: var(--transition);
+    }
+
+    .result .register-link:hover {
+      background: var(--blue-hover);
+    }
+
+    /* ── Footer ── */
+    .footer {
+      padding: 0 24px 20px;
+      text-align: center;
+    }
+
+    .footer p {
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+
+    /* ── Loading overlay ── */
+    .loading-overlay {
       display: none;
       position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: rgba(0, 0, 0, 0.5);
+      inset: 0;
+      background: rgba(29,33,41,0.45);
       z-index: 1000;
       align-items: center;
       justify-content: center;
     }
 
-    .loading.show {
+    .loading-overlay.show {
       display: flex;
     }
 
-    .spinner {
-      width: 50px;
-      height: 50px;
-      border: 4px solid #f3f3f3;
-      border-top: 4px solid #1677ff;
+    .loading-overlay .box {
+      background: #fff;
+      padding: 28px 36px;
+      border-radius: var(--radius-card);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+      text-align: center;
+    }
+
+    .loading-overlay .box .spinner {
+      width: 28px;
+      height: 28px;
+      margin: 0 auto 10px;
+      border: 3px solid var(--border);
+      border-top-color: var(--blue);
       border-radius: 50%;
-      animation: spin 1s linear infinite;
+      animation: spin 0.6s linear infinite;
     }
 
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
+    .loading-overlay .box span {
+      font-size: 14px;
+      color: var(--text-secondary);
     }
 
-    .api-status {
+    /* ── Status badge ── */
+    .status-badge {
       position: fixed;
-      top: 10px;
-      right: 10px;
-      padding: 6px 12px;
-      border-radius: 20px;
+      top: 12px;
+      right: 12px;
+      padding: 4px 12px;
+      border-radius: 4px;
       font-size: 12px;
       z-index: 100;
+      opacity: 0;
+      transition: opacity 0.25s;
+      pointer-events: none;
     }
 
-    .api-status.connected {
-      background: #f6ffed;
-      color: #52c41a;
-    }
+    .status-badge.show { opacity: 1; }
+    .status-badge.connected { background: var(--green-light); color: var(--green); }
+    .status-badge.disconnected { background: var(--red-light); color: var(--red); }
 
-    .api-status.disconnected {
-      background: #fff2f0;
-      color: #ff4d4f;
-    }
-
-    .api-status.checking {
-      background: #e6f7ff;
-      color: #1890ff;
-    }
-
-    /* 隐藏手机端默认样式 */
-    input[type="tel"]::-webkit-outer-spin-button,
-    input[type="tel"]::-webkit-inner-spin-button {
-      -webkit-appearance: none;
-      margin: 0;
+    /* ── Responsive ── */
+    @media (max-width: 400px) {
+      body { padding: 12px; }
+      .header { padding: 24px 16px 16px; }
+      .content { padding: 0 16px 20px; }
+      .header-icon { width: 40px; height: 40px; font-size: 18px; }
+      .header h1 { font-size: 16px; }
+      .input-wrap input { height: 44px; font-size: 15px; }
+      .btn { height: 42px; font-size: 14px; margin-top: 16px; }
+      .result { padding: 16px; }
     }
   </style>
 </head>
 <body>
-  <!-- API 状态指示器 -->
-  <div id="apiStatus" class="api-status checking">检查连接...</div>
 
-  <!-- 加载中遮罩 -->
-  <div id="loading" class="loading">
-    <div class="spinner"></div>
+  <div id="statusBadge" class="status-badge">系统中</div>
+
+  <div id="loadingOverlay" class="loading-overlay">
+    <div class="box">
+      <div class="spinner"></div>
+      <span id="loadingText">处理中…</span>
+    </div>
   </div>
 
   <div class="container">
     <div class="card">
       <div class="header">
-        <div class="header-icon">📋</div>
+        <div class="header-icon" id="headerIcon">📋</div>
         <h1 id="eventTitle">现场签到</h1>
-        <p id="eventDesc">请输入报名时填写的手机号码</p>
+        <p id="eventDesc">请输入报名时填写的手机号</p>
       </div>
 
       <div class="content">
-        <form id="signinForm">
+        <form id="signinForm" novalidate>
           <div class="form-group">
-            <div class="input-wrapper">
+            <div class="input-wrap" id="inputWrap">
               <input
                 type="tel"
                 id="phone"
                 placeholder="请输入手机号"
-                maxlength="15"
-                required
+                maxlength="11"
                 autocomplete="tel"
+                inputmode="numeric"
+                pattern="[0-9]*"
               />
             </div>
+            <div id="hint" class="hint"></div>
           </div>
 
           <button type="submit" class="btn btn-primary" id="submitBtn">
-            立即签到
+            <span class="spinner"></span>
+            <span class="btn-text">立即签到</span>
           </button>
         </form>
 
@@ -337,219 +453,172 @@
   </div>
 
   <script>
-    // ============ 配置 ============
-    const API_BASE = window.location.origin;
-    
-    // 从URL参数获取 bitable_token 和 table_id
-    const urlParams = new URLSearchParams(window.location.search);
-    const BITABLE_TOKEN = urlParams.get('app') || '';
-    const TABLE_ID = urlParams.get('table') || '';
+    const API = window.location.origin;
+    const params = new URLSearchParams(window.location.search);
+    const TOKEN = params.get('app') || '';
+    const TABLE = params.get('table') || '';
+    let submitting = false;
 
-    // DOM 元素
     const form = document.getElementById('signinForm');
-    const phoneInput = document.getElementById('phone');
-    const submitBtn = document.getElementById('submitBtn');
-    const resultDiv = document.getElementById('result');
-    const loadingDiv = document.getElementById('loading');
-    const apiStatus = document.getElementById('apiStatus');
-    const eventTitle = document.getElementById('eventTitle');
-    const eventDesc = document.getElementById('eventDesc');
-    const tableName = document.getElementById('tableName');
+    const input = document.getElementById('phone');
+    const inputWrap = document.getElementById('inputWrap');
+    const hint = document.getElementById('hint');
+    const btn = document.getElementById('submitBtn');
+    const result = document.getElementById('result');
+    const overlay = document.getElementById('loadingOverlay');
+    const loadingText = document.getElementById('loadingText');
+    const badge = document.getElementById('statusBadge');
+    const title = document.getElementById('eventTitle');
+    const footer = document.getElementById('tableName');
 
-    // ============ 初始化 ============
-    async function init() {
-      // 如果有 bitable_token，先加载配置
-      if (BITABLE_TOKEN) {
-        await loadConfig();
+    // ── Validation ──
+    const vMsg = (v) => {
+      if (!v.trim()) return '请输入手机号码';
+      if (!/^\d+$/.test(v.trim())) return '手机号只能包含数字';
+      if (v.trim().length < 7) return '手机号格式不正确';
+      return '';
+    };
+
+    const showHint = (text, type) => {
+      hint.className = 'hint show ' + type;
+      hint.textContent = text;
+      if (type === 'error') inputWrap.className = 'input-wrap error';
+      else if (type === 'success') inputWrap.className = 'input-wrap success';
+      else inputWrap.className = 'input-wrap';
+    };
+
+    const clearHint = () => {
+      hint.className = 'hint';
+      inputWrap.className = 'input-wrap';
+    };
+
+    input.addEventListener('input', () => {
+      const err = vMsg(input.value);
+      if (err) showHint(err, 'error');
+      else if (input.value.trim().length >= 7) showHint('✓', 'success');
+      else clearHint();
+    });
+
+    input.addEventListener('blur', () => {
+      if (!input.value.trim()) clearHint();
+      else {
+        const err = vMsg(input.value);
+        if (err) showHint(err, 'error');
       }
-      
-      // 检查 API 连接
-      await checkApiConnection();
-      
-      // 聚焦手机号输入框
-      phoneInput.focus();
-    }
+    });
 
-    // 加载表格配置
-    async function loadConfig() {
+    // ── Init ──
+    (async () => {
+      if (TOKEN) {
+        try {
+          const body = { bitable_token: TOKEN };
+          if (TABLE) body.table_id = TABLE;
+          const res = await fetch(API + '/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          });
+          const d = await res.json();
+          if (d.success && d.table_name) {
+            title.textContent = d.table_name;
+            footer.textContent = d.table_name;
+          }
+        } catch (e) { console.error(e); }
+      }
+
       try {
-        const body = { bitable_token: BITABLE_TOKEN };
-        if (TABLE_ID) body.table_id = TABLE_ID;
-        
-        const response = await fetch(`${API_BASE}/api/config`, {
+        const res = await fetch(API + '/health');
+        const d = await res.json();
+        badge.className = 'status-badge show connected';
+        badge.textContent = '系统正常';
+      } catch {
+        badge.className = 'status-badge show disconnected';
+        badge.textContent = '连接异常';
+      }
+
+      setTimeout(() => {
+        badge.classList.remove('show');
+        input.focus();
+      }, 2500);
+    })();
+
+    // ── Sign-in ──
+    const showResult = (status, msg, name, seat, time, regUrl) => {
+      const icons = { success: '✓', already: '⏰', not_found: '?' };
+      const titles = { success: '签到成功', already: '已签到', not_found: '未找到报名信息' };
+      const cls = { success: 'result-success', already: 'result-already', not_found: 'result-error' };
+
+      const icon = icons[status] || '✕';
+      const t = titles[status] || '签到失败';
+      const c = cls[status] || 'result-error';
+
+      let html = `<div class="icon">${icon}</div><h3>${t}</h3><p>${msg}</p>`;
+      if (name) html += `<div class="name">${name}</div>`;
+      if (seat) html += `<div class="seat">${seat}</div>`;
+      if (time) html += `<div class="time">${time}</div>`;
+      if (status === 'not_found' && regUrl) {
+        html += `<div><a class="register-link" href="${regUrl}" target="_blank" rel="noopener">去报名</a></div>`;
+      }
+
+      result.className = 'result show ' + c;
+      result.innerHTML = html;
+
+      if (status === 'success' || status === 'already') form.style.display = 'none';
+    };
+
+    const setLoading = (show, text) => {
+      if (show) {
+        loadingText.textContent = text || '处理中…';
+        overlay.classList.add('show');
+        btn.disabled = true;
+        btn.classList.add('loading');
+      } else {
+        overlay.classList.remove('show');
+        btn.disabled = false;
+        btn.classList.remove('loading');
+      }
+    };
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (submitting) return;
+
+      const phone = input.value.trim();
+      const err = vMsg(phone);
+      if (err) { showHint(err, 'error'); input.focus(); return; }
+
+      submitting = true;
+      setLoading(true, '正在查询…');
+
+      try {
+        const body = { phone, bitable_token: TOKEN };
+        if (TABLE) body.table_id = TABLE;
+        const res = await fetch(API + '/api/signin', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         });
-
-        const data = await response.json();
-        
-        if (data.success) {
-          // 更新页面标题
-          if (data.table_name) {
-            eventTitle.textContent = data.table_name;
-            tableName.textContent = `数据表: ${data.table_name}`;
-          }
-        }
-      } catch (error) {
-        console.error('加载配置失败:', error);
+        const d = await res.json();
+        setLoading(false);
+        clearHint();
+        showResult(d.status, d.message, d.name, d.seat, d.first_signin_time, d.register_form_url);
+      } catch {
+        setLoading(false);
+        showResult('error', '网络异常，请检查后重试');
+      } finally {
+        submitting = false;
       }
-    }
+    });
 
-    // ============ 功能函数 ============
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') form.requestSubmit();
+    });
 
-    // 显示/隐藏加载
-    function showLoading() {
-      loadingDiv.classList.add('show');
-      submitBtn.disabled = true;
-    }
-
-    function hideLoading() {
-      loadingDiv.classList.remove('show');
-      submitBtn.disabled = false;
-    }
-
-    // 显示结果
-    function showResult(status, message, name, seat, firstTime, registerFormUrl) {
-      let icon, title, className;
-
-      switch (status) {
-        case 'success':
-          icon = '✓';
-          title = '签到成功';
-          className = 'result-success';
-          break;
-        case 'already':
-          icon = '⏰';
-          title = '已签到';
-          className = 'result-already';
-          break;
-        case 'not_found':
-          icon = '❓';
-          title = '未找到报名信息';
-          className = 'result-error';
-          break;
-        default:
-          icon = '❌';
-          title = '签到失败';
-          className = 'result-error';
-      }
-
-      let html = `<div class="icon">${icon}</div>`;
-      html += `<h3>${title}</h3>`;
-      html += `<p>${message}</p>`;
-
-      if (name) {
-        html += `<div class="name">${name}</div>`;
-      }
-
-      // 显示座位信息
-      if (seat) {
-        html += `<div class="seat">座位: ${seat}</div>`;
-      }
-
-      if (firstTime) {
-        html += `<div class="time">首次签到时间: ${firstTime}</div>`;
-      }
-
-      // 未报名时显示"去报名"按钮
-      if (status === 'not_found' && registerFormUrl) {
-        html += `<div style="margin-top: 16px;">
-          <a href="${registerFormUrl}" target="_blank" rel="noopener noreferrer" 
-             style="display: inline-block; padding: 12px 28px; background: linear-gradient(135deg, #1677ff 0%, #4096ff 100%); 
-                    color: white; border-radius: 12px; text-decoration: none; font-size: 16px; font-weight: 600;">
-            📝 去报名
-          </a>
-        </div>`;
-      }
-
-      resultDiv.className = `result show ${className}`;
-      resultDiv.innerHTML = html;
-
-      // 成功或已签到时隐藏表单
-      if (status === 'success' || status === 'already') {
-        form.style.display = 'none';
-      }
-    }
-
-    // 检查 API 连接
-    async function checkApiConnection() {
-      try {
-        apiStatus.className = 'api-status checking';
-        apiStatus.textContent = '检查连接...';
-
-        const response = await fetch(`${API_BASE}/health`, {
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' }
-        });
-
-        const data = await response.json();
-
-        if (data.status === 'ok') {
-          apiStatus.className = 'api-status connected';
-          apiStatus.textContent = '系统正常';
-          return true;
-        } else {
-          apiStatus.className = 'api-status disconnected';
-          apiStatus.textContent = '系统异常';
-          return false;
-        }
-      } catch (error) {
-        console.error('API 连接检查失败:', error);
-        apiStatus.className = 'api-status disconnected';
-        apiStatus.textContent = '连接失败';
-        return false;
-      }
-    }
-
-    // 提交签到
-    async function handleSubmit(e) {
-      e.preventDefault();
-
-      const phone = phoneInput.value.trim();
-
-      if (!phone || phone.length < 7) {
-        showResult('error', '请输入正确的手机号码');
-        return;
-      }
-
-      showLoading();
-
-      try {
-        const body = { phone, bitable_token: BITABLE_TOKEN };
-        if (TABLE_ID) body.table_id = TABLE_ID;
-        
-        const response = await fetch(`${API_BASE}/api/signin`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(body)
-        });
-
-        const data = await response.json();
-
-        hideLoading();
-        showResult(
-          data.status,
-          data.message,
-          data.name,
-          data.seat,
-          data.first_signin_time,
-          data.register_form_url  // 未报名时的报名链接
-        );
-      } catch (error) {
-        console.error('签到请求失败:', error);
-        hideLoading();
-        showResult('error', '网络错误，请检查网络后重试');
-      }
-    }
-
-    // ============ 事件监听 ============
-    form.addEventListener('submit', handleSubmit);
-
-    // 页面加载时初始化
-    init();
+    input.addEventListener('paste', () => {
+      setTimeout(() => {
+        if (!vMsg(input.value) && input.value.trim().length >= 7) form.requestSubmit();
+      }, 50);
+    });
   </script>
 </body>
 </html>
