@@ -103,42 +103,51 @@ cache = MemoryCache()
 
 
 class RecordCache:
-    """签到记录缓存：预加载整表记录，后续签到秒级响应"""
+    """签到记录缓存：手机号→记录 的索引，毫秒级查找"""
     
-    CACHE_KEY_PREFIX = "records_"
-    CACHE_TTL = 600  # 缓存10分钟，过期自动刷新
+    CACHE_KEY_PREFIX = "idx_"  # 索引前缀
+    CACHE_TTL = 600  # 缓存10分钟
     
-    def get_records(self, bitable_token: str) -> Optional[list]:
-        return cache.get(f"{self.CACHE_KEY_PREFIX}{bitable_token}")
+    def _index_key(self, bitable_token: str) -> str:
+        return f"{self.CACHE_KEY_PREFIX}{bitable_token}"
     
-    def set_records(self, bitable_token: str, records: list):
-        cache.set(f"{self.CACHE_KEY_PREFIX}{bitable_token}", records, ttl_seconds=self.CACHE_TTL)
-    
-    def refresh(self, bitable_token: str, table_id: str):
-        """拉取全量记录并刷新缓存"""
-        try:
-            all_records = feishu.get_records(bitable_token, table_id, page_size=500)
-            self.set_records(bitable_token, all_records)
-            logger.info(f"记录缓存刷新完成: {bitable_token}, 共 {len(all_records)} 条")
-        except Exception as e:
-            logger.warning(f"记录缓存刷新失败: {e}")
-    
-    def find_by_phone(self, bitable_token: str, phone_field_name: str, phone: str) -> Optional[dict]:
-        """在缓存的记录中按手机号查找，返回找到的记录或 None"""
-        records = self.get_records(bitable_token)
-        if not records:
-            return None
-        
-        normalized = phone.replace(" ", "").replace("-", "")
+    def _build_index(self, records: list, phone_field_name: str) -> dict:
+        """构建手机号→记录的索引"""
+        index = {}
         for record in records:
             fields_data = record.get("fields", {})
             phone_value = fields_data.get(phone_field_name)
             if phone_value:
-                phone_list = extract_phone_values(phone_value)
-                for p in phone_list:
-                    pn = p.replace(" ", "").replace("-", "")
-                    if pn.endswith(normalized) or normalized.endswith(pn):
-                        return record
+                phones = extract_phone_values(phone_value)
+                for p in phones:
+                    normalized = p.replace(" ", "").replace("-", "")
+                    if normalized and normalized not in index:
+                        index[normalized] = record
+        return index
+    
+    def refresh(self, bitable_token: str, table_id: str, phone_field_name: str):
+        """拉取全量记录并构建索引缓存"""
+        try:
+            all_records = feishu.get_records(bitable_token, table_id, page_size=500)
+            index = self._build_index(all_records, phone_field_name)
+            cache.set(self._index_key(bitable_token), index, ttl_seconds=self.CACHE_TTL)
+            logger.info(f"缓存刷新: {bitable_token}, 共 {len(all_records)} 条记录, {len(index)} 个手机号索引")
+        except Exception as e:
+            logger.warning(f"缓存刷新失败: {e}")
+    
+    def find_by_phone(self, bitable_token: str, phone: str) -> Optional[dict]:
+        """按手机号查找（O(1) 字典查找）"""
+        index = cache.get(self._index_key(bitable_token))
+        if not index:
+            return None
+        normalized = phone.replace(" ", "").replace("-", "")
+        record = index.get(normalized)
+        if record:
+            return record
+        # 容错：尝试后缀匹配（手机号可能有不同前缀）
+        for key, record in index.items():
+            if key.endswith(normalized) or normalized.endswith(key):
+                return record
         return None
 
 record_cache = RecordCache()
@@ -533,6 +542,25 @@ def health_check():
     })
 
 
+@app.route("/api/cache/status", methods=["GET"])
+def cache_status():
+    """缓存状态查询（调试用）"""
+    bitable_token = request.args.get("token", "").strip()
+    if not bitable_token:
+        return jsonify({"error": "请提供 ?token=xxx 参数"})
+    
+    config = get_cached_config(bitable_token)
+    index = cache.get(f"idx_{bitable_token}")
+    
+    return jsonify({
+        "ok": True,
+        "config_cached": bool(config and "fields" in config),
+        "records_cached": bool(index),
+        "records_count": len(index) if index else 0,
+        "config_keys": list(config.keys()) if config else [],
+    })
+
+
 @app.route("/api/plugin/register", methods=["POST"])
 @rate_limit_check()
 def plugin_register():
@@ -587,7 +615,19 @@ def plugin_register():
 
         # 预加载签到记录到缓存（打开插件即准备，第一个签到者不用等）
         if table_id:
-            record_cache.refresh(bitable_token, table_id)
+            # 自动检测手机号字段名，并预加载索引缓存
+            try:
+                fields = feishu.get_field_list(bitable_token, table_id)
+                phone_field = None
+                for f in fields:
+                    fname = f["field_name"]
+                    if "手机" in fname or "phone" in fname.lower():
+                        phone_field = fname
+                        break
+                if phone_field:
+                    record_cache.refresh(bitable_token, table_id, phone_field)
+            except Exception as e:
+                logger.warning(f"插件预加载失败: {e}")
 
         # 生成签到 URL（包含 table_id，便于直接访问时使用）
         signin_url = generate_signin_url(bitable_token)
@@ -801,17 +841,14 @@ def signin():
         # 查找报名记录（优先内存缓存，再拉取全量）
         matched_record = None
         if phone_field_name:
-            normalized_phone = phone.replace(" ", "").replace("-", "")
+            # 1) 先在索引缓存中查找（O(1) 字典，毫秒级）
+            matched_record = record_cache.find_by_phone(bitable_token, phone)
             
-            # 1) 先在缓存中查找（瞬时返回）
-            matched_record = record_cache.find_by_phone(bitable_token, phone_field_name, phone)
-            
-            # 2) 缓存未命中，拉取全量记录并缓存
+            # 2) 缓存未命中，拉取全量记录并建索引
             if not matched_record:
-                logger.info(f"预加载记录: {bitable_token}")
-                all_records = feishu.get_records(bitable_token, table_id, page_size=500)
-                record_cache.set_records(bitable_token, all_records)
-                matched_record = record_cache.find_by_phone(bitable_token, phone_field_name, phone)
+                logger.info(f"初始化缓存: {bitable_token}")
+                record_cache.refresh(bitable_token, table_id, phone_field_name)
+                matched_record = record_cache.find_by_phone(bitable_token, phone)
 
         # 未找到报名记录（返回报名链接）
         if not matched_record:
