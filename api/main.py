@@ -811,11 +811,17 @@ def signin():
                 elif "签到状态" in name or "status" in name_lower:
                     status_field_id = fid
                     status_field_name = name
-                    # 单选项需要传选项 ID，提取"已签到"选项的 ID
-                    for opt in (field.get("property") or {}).get("options", []):
-                        if opt.get("name") == "已签到":
-                            status_option_id = opt["id"]
+                    # 单选项需要传选项 ID，尝试多种方式提取"已签到"选项
+                    prop = field.get("property") or {}
+                    opts = prop.get("options") or prop.get("option") or []
+                    for opt in opts:
+                        opt_name = (opt.get("name") or opt.get("text") or "").strip()
+                        if "已签到" in opt_name:
+                            status_option_id = opt.get("id") or opt.get("option_id")
+                            logger.info(f"检测到签到状态选项: name={opt_name}, id={status_option_id}")
                             break
+                    if not status_option_id:
+                        logger.warning(f"未找到已签到选项，字段属性: {prop}")
                 elif "签到时间" in name or "time" in name_lower:
                     time_field_id = fid
                     time_field_name = name
