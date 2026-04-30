@@ -42,9 +42,11 @@
       flex-direction: column;
       align-items: center;
       justify-content: flex-start;
-      padding: 6vh 16px 0;
+      padding: 6vh 16px 24px;
       -webkit-font-smoothing: antialiased;
-      overflow: hidden;
+      overflow-x: hidden;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
 
     /* ── Ambient glow ── */
@@ -358,6 +360,11 @@
       display: grid;
       gap: 8px;
       margin-top: 14px;
+      max-height: min(42vh, 320px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      padding-right: 2px;
     }
 
     .candidate-btn {
@@ -461,7 +468,7 @@
 
     /* ── Responsive ── */
     @media (max-width: 400px) {
-      body { padding: 5vh 12px 0; }
+      body { padding: 5vh 12px 24px; }
       .header { padding: 32px 20px 12px; }
       .content { padding: 8px 20px 24px; }
       .header-icon { width: 44px; height: 44px; font-size: 18px; }
@@ -469,6 +476,7 @@
       .input-wrap input { height: 46px; font-size: 16px; }
       .btn { height: 46px; font-size: 14px; }
       .result { padding: 16px; }
+      .candidate-list { max-height: 36vh; }
     }
   </style>
 </head>
