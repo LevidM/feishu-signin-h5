@@ -510,22 +510,32 @@ def find_signin_table(bitable_token: str) -> Tuple[str, str]:
 def detect_form_url(bitable_token: str, table_id: str, table_name: str = "") -> str:
     """
     检测表格中的表单视图，返回外部可访问的表单 URL。
-    如果找不到表单视图或 API 调用失败，返回空字符串。
+    优先从飞书表单 API 获取分享链接，失败时用 view_id 构造。
     """
     try:
         views = feishu.get_view_list(bitable_token, table_id)
         for view in views:
-            # view_type: "form"(Open API) 或 3(Block SDK)
             vt = view.get("view_type")
             if vt == "form" or vt == 3 or view.get("type") == 3:
                 view_id = view["view_id"]
-                # 标准 Feishu URL 格式：指定 table 和 view
-                return f"https://bytedance.feishu.cn/base/{bitable_token}?table={table_id}&view={view_id}"
+                # 优先通过表单 API 获取分享链接（包含完整的 shr 分享 ID）
+                try:
+                    form_data = feishu.api_request(
+                        "GET",
+                        f"/bitable/v1/apps/{bitable_token}/tables/{table_id}/forms/{view_id}"
+                    )
+                    form_info = form_data.get("form", {})
+                    if form_info.get("shared") and form_info.get("shared_url"):
+                        return form_info["shared_url"]
+                except Exception:
+                    pass
+                # 失败时用 view_id 构造链接
+                return f"https://fszi-org.feishu.cn/base/{bitable_token}?table={table_id}&view={view_id}"
             # 容错：视图名包含"报名"也视为表单
             if vt == "grid" and "报名" in view.get("view_name", ""):
                 view_id = view["view_id"]
-                logger.info(f"按名称匹配到报名表单: {view.get('view_name')}")
-                return f"https://bytedance.feishu.cn/base/{bitable_token}?table={table_id}&view={view_id}"
+                logger.info(f"按名称匹配到报名视图: {view.get('view_name')}")
+                return f"https://fszi-org.feishu.cn/base/{bitable_token}?table={table_id}&view={view_id}"
     except Exception as e:
         logger.warning(f"检测表单视图失败: {e}")
     return ""
