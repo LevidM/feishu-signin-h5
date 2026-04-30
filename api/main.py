@@ -401,6 +401,46 @@ def success_response(**kwargs):
     return jsonify({"status": "success", **kwargs})
 
 
+def find_signin_table(bitable_token: str) -> Tuple[str, str]:
+    """
+    智能查找签到用的正确表格。
+    扫描所有表格的字段名，找到包含手机的表格（签到目标表）。
+    如果找不到，回退到第一个表格。
+    
+    返回: (table_id, table_name)
+    """
+    table_list = feishu.get_table_list(bitable_token)
+    if not table_list:
+        raise Exception("该多维表格没有任何数据表")
+
+    # 尝试按名称匹配（报名、签到相关）
+    for t in table_list:
+        tbl_name = t.get("name", "")
+        if "报名" in tbl_name or "签到" in tbl_name:
+            logger.info(f"按名称匹配到签到表: {tbl_name}")
+            return t["table_id"], tbl_name
+
+    # 按字段特征匹配：扫描每个表的字段名，找包含"手机"的表
+    candidates = []
+    for t in table_list:
+        tbl_id = t["table_id"]
+        tbl_name = t.get("name", "未命名")
+        try:
+            fields = feishu.get_field_list(bitable_token, tbl_id)
+            for f in fields:
+                fname = f.get("field_name", "")
+                if "手机" in fname or "phone" in fname.lower():
+                    logger.info(f"按字段匹配到签到表: {tbl_name} (字段: {fname})")
+                    return tbl_id, tbl_name
+        except Exception:
+            continue  # 跳过无法读取字段的表
+
+    # 回退到第一个表格
+    first = table_list[0]
+    logger.warning(f"未找到签到表，回退到: {first.get('name', '未命名')}")
+    return first["table_id"], first.get("name", "未命名表格")
+
+
 # ==================== API 路由 ====================
 
 @app.route("/health")
@@ -431,9 +471,10 @@ def plugin_register():
 
     请求参数：
     {
-        "bitable_token": "bascnxxx",  // 多维表格 Token（必填）
-        "table_id": "tblxxx",         // 表格 ID（可选）
-        "event_name": "产品发布会"    // 活动名称（可选）
+        "bitable_token": "bascnxxx",    // 多维表格 Token（必填）
+        "table_id": "tblxxx",           // 表格 ID（可选）
+        "event_name": "产品发布会",     // 活动名称（可选）
+        "register_form_url": "https://"  // 报名表单 URL（可选）
     }
 
     返回：
@@ -454,8 +495,26 @@ def plugin_register():
         # 验证 Token 有效性（确认 H5 后端可连通飞书）
         feishu.get_app_info(bitable_token)
 
-        # 生成签到 URL
+        # 缓存 Block 插件提供的信息（供签到接口使用）
+        table_id = data.get("table_id", "").strip()
+        register_form_url = data.get("register_form_url", "").strip()
+        signin_config = data.get("config") or {}  # 签到行为配置
+        
+        cache_data = {}
+        if table_id:
+            cache_data["table_id"] = table_id
+        if register_form_url:
+            cache_data["register_form_url"] = register_form_url
+        if signin_config:
+            cache_data["signin_config"] = signin_config
+        if cache_data:
+            set_cached_config(bitable_token, cache_data)
+            logger.info(f"缓存签到配置: {cache_data}")
+
+        # 生成签到 URL（包含 table_id，便于直接访问时使用）
         signin_url = generate_signin_url(bitable_token)
+        if table_id:
+            signin_url += f"&table={table_id}"
 
         logger.info(f"插件连通性验证通过: bitable={bitable_token}")
         return jsonify({
@@ -476,7 +535,8 @@ def get_config():
     
     请求参数：
     {
-        "bitable_token": "xxx"  // 可选，不传则使用默认配置
+        "bitable_token": "xxx",   // 多维表格 Token
+        "table_id": "tblxxx"      // 表格 ID（可选，自动检测）
     }
     """
     data = request.get_json() or {}
@@ -487,26 +547,36 @@ def get_config():
         return error_response("缺少 bitable_token 参数")
 
     try:
+        # 请求中指定的 table_id（H5 页面从 URL 参数传递）
+        request_table_id = data.get("table_id", "").strip()
+
         # 尝试从缓存获取
         config = get_cached_config(bitable_token)
+
+        # 提取注册表单 URL（可能来自缓存，后续再补充）
+        register_form_url = ""
         
-        if config:
+        if config and "fields" in config:
+            # 完整缓存命中
             return jsonify({
                 "success": True,
                 "cached": True,
-                **config
+                "bitable_token": bitable_token,
+                "table_id": config.get("table_id", ""),
+                "table_name": config.get("table_name", ""),
+                "fields": config.get("fields", {}),
+                "register_form_url": config.get("register_form_url", ""),
             })
+        
+        # 缓存不存在或不完整，重新获取
+        if request_table_id:
+            table_id = request_table_id
+        elif config and config.get("table_id"):
+            table_id = config["table_id"]
+            register_form_url = config.get("register_form_url", "")
+        else:
+            table_id, _ = find_signin_table(bitable_token)
 
-        # 缓存不存在，重新获取
-        table_list = feishu.get_table_list(bitable_token)
-        if not table_list:
-            return error_response("没有找到任何表格")
-
-        first_table = table_list[0]
-        table_id = first_table["table_id"]
-        table_name = first_table.get("name", "未命名表格")
-
-        # 获取字段列表
         fields = feishu.get_field_list(bitable_token, table_id)
 
         # 构建字段映射
@@ -514,13 +584,21 @@ def get_config():
         for field in fields:
             field_map[field["field_name"]] = field["field_id"]
 
+        # 获取表格名称
+        try:
+            table_list = feishu.get_table_list(bitable_token)
+            table_name = next((t.get("name") for t in table_list if t["table_id"] == table_id), "")
+        except:
+            table_name = ""
+
         return jsonify({
             "success": True,
             "cached": False,
             "bitable_token": bitable_token,
             "table_id": table_id,
             "table_name": table_name,
-            "fields": field_map
+            "fields": field_map,
+            "register_form_url": register_form_url,
         })
     except Exception as e:
         logger.error(f"获取配置失败: {e}")
@@ -552,21 +630,28 @@ def signin():
     bitable_token = data.get("bitable_token", "").strip()
     if not bitable_token:
         return error_response("缺少 bitable_token 参数")
+    
+    # 优先使用请求中指定的 table_id（H5 页面从 URL 参数传递）
+    request_table_id = data.get("table_id", "").strip()
 
     try:
-        # 优先使用缓存配置
+        # 优先使用缓存配置（必须是完整配置，含字段映射）
         config = get_cached_config(bitable_token)
         
-        if not config:
-            # 缓存不存在，重新获取并缓存
-            table_list = feishu.get_table_list(bitable_token)
-            if not table_list:
-                return jsonify({
-                    "status": "error",
-                    "message": "没有找到表格"
-                })
-
-            table_id = table_list[0]["table_id"]
+        if not config or "fields" not in config:
+            # 缓存不存在或不完整，重新获取并缓存
+            # 优先级：请求参数 > 缓存(插件提供) > 自动检测
+            if request_table_id:
+                table_id = request_table_id
+                table_name = ""
+            else:
+                cached_table_id = config.get("table_id") if config else None
+                if cached_table_id:
+                    table_id = cached_table_id
+                    table_name = ""
+                else:
+                    table_id, table_name = find_signin_table(bitable_token)
+            
             fields = feishu.get_field_list(bitable_token, table_id)
             
             # 构建字段映射
@@ -643,17 +728,30 @@ def signin():
 
         # 未找到报名记录
         if not matched_records:
-            return jsonify({
+            result = {
                 "status": "not_found",
                 "message": "未查询到您的报名信息，请检查手机号是否正确"
-            })
+            }
+            # 如果有报名表单链接，一并返回
+            if config and config.get("register_form_url"):
+                result["register_form_url"] = config["register_form_url"]
+            return jsonify(result)
 
         record = matched_records[0]
         record_id = record["record_id"]
         record_fields = record.get("fields", {})
 
+        # 读取签到行为配置（从 Block 插件传入，使用默认值兜底）
+        signin_cfg = (config or {}).get("signin_config") or {}
+        update_status = signin_cfg.get("update_signin_status", True)
+        update_time = signin_cfg.get("update_signin_time", True)
+        return_name = signin_cfg.get("return_name", True)
+        return_seat = signin_cfg.get("return_seat", True)
+        success_msg = signin_cfg.get("success_message", "签到成功，欢迎参会！")
+        already_msg = signin_cfg.get("already_message", "您已完成签到，请勿重复提交")
+
         # 检查是否已签到
-        if status_field_id:
+        if status_field_id and update_status:
             current_status = extract_status_value(record_fields.get(status_field_id))
             if current_status in ["已签到", "已签到 "]:
                 first_time = ""
@@ -664,31 +762,31 @@ def signin():
 
                 return jsonify({
                     "status": "already",
-                    "message": "您已完成签到，请勿重复提交",
-                    "name": extract_name_value(record_fields.get(name_field_id)) if name_field_id else None,
-                    "seat": extract_name_value(record_fields.get(seat_field_id)) if seat_field_id else None,
+                    "message": already_msg,
+                    "name": extract_name_value(record_fields.get(name_field_id)) if name_field_id and return_name else None,
+                    "seat": extract_name_value(record_fields.get(seat_field_id)) if seat_field_id and return_seat else None,
                     "first_signin_time": first_time
                 })
 
         # 执行签到
         update_fields = {}
 
-        if status_field_id:
+        if status_field_id and update_status:
             update_fields[status_field_id] = "已签到"
 
-        if time_field_id:
+        if time_field_id and update_time:
             update_fields[time_field_id] = datetime.now().timestamp() * 1000  # 毫秒
 
         feishu.update_record(bitable_token, table_id, record_id, update_fields)
 
         logger.info(f"签到成功: 手机号 {phone}, 记录 {record_id}")
 
-        # 返回签到成功信息和座位信息
+        # 返回签到成功信息
         return jsonify({
             "status": "success",
-            "message": "签到成功，欢迎参会！",
-            "name": extract_name_value(record_fields.get(name_field_id)) if name_field_id else None,
-            "seat": extract_name_value(record_fields.get(seat_field_id)) if seat_field_id else None,
+            "message": success_msg,
+            "name": extract_name_value(record_fields.get(name_field_id)) if name_field_id and return_name else None,
+            "seat": extract_name_value(record_fields.get(seat_field_id)) if seat_field_id and return_seat else None,
             "record_id": record_id
         })
 

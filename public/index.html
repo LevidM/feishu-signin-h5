@@ -338,9 +338,10 @@
     // ============ 配置 ============
     const API_BASE = window.location.origin;
     
-    // 从URL参数获取 bitable_token
+    // 从URL参数获取 bitable_token 和 table_id
     const urlParams = new URLSearchParams(window.location.search);
     const BITABLE_TOKEN = urlParams.get('app') || '';
+    const TABLE_ID = urlParams.get('table') || '';
 
     // DOM 元素
     const form = document.getElementById('signinForm');
@@ -370,10 +371,13 @@
     // 加载表格配置
     async function loadConfig() {
       try {
+        const body = { bitable_token: BITABLE_TOKEN };
+        if (TABLE_ID) body.table_id = TABLE_ID;
+        
         const response = await fetch(`${API_BASE}/api/config`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ bitable_token: BITABLE_TOKEN })
+          body: JSON.stringify(body)
         });
 
         const data = await response.json();
@@ -404,7 +408,7 @@
     }
 
     // 显示结果
-    function showResult(status, message, name, seat, firstTime) {
+    function showResult(status, message, name, seat, firstTime, registerFormUrl) {
       let icon, title, className;
 
       switch (status) {
@@ -444,6 +448,17 @@
 
       if (firstTime) {
         html += `<div class="time">首次签到时间: ${firstTime}</div>`;
+      }
+
+      // 未报名时显示"去报名"按钮
+      if (status === 'not_found' && registerFormUrl) {
+        html += `<div style="margin-top: 16px;">
+          <a href="${registerFormUrl}" target="_blank" rel="noopener noreferrer" 
+             style="display: inline-block; padding: 12px 28px; background: linear-gradient(135deg, #1677ff 0%, #4096ff 100%); 
+                    color: white; border-radius: 12px; text-decoration: none; font-size: 16px; font-weight: 600;">
+            📝 去报名
+          </a>
+        </div>`;
       }
 
       resultDiv.className = `result show ${className}`;
@@ -499,15 +514,15 @@
       showLoading();
 
       try {
+        const body = { phone, bitable_token: BITABLE_TOKEN };
+        if (TABLE_ID) body.table_id = TABLE_ID;
+        
         const response = await fetch(`${API_BASE}/api/signin`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ 
-            phone,
-            bitable_token: BITABLE_TOKEN
-          })
+          body: JSON.stringify(body)
         });
 
         const data = await response.json();
@@ -518,7 +533,8 @@
           data.message,
           data.name,
           data.seat,
-          data.first_signin_time
+          data.first_signin_time,
+          data.register_form_url  // 未报名时的报名链接
         );
       } catch (error) {
         console.error('签到请求失败:', error);
