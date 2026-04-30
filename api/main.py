@@ -52,6 +52,9 @@ import httpx
 # 加载环境变量
 load_dotenv()
 
+# 项目根目录（因为 main.py 在 api/ 下，所以往上一级）
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -700,7 +703,7 @@ def signin():
 @app.route("/")
 def index():
     """返回 H5 签到页面"""
-    return send_from_directory("public", "index.html")
+    return send_from_directory(os.path.join(_APP_ROOT, "public"), "index.html")
 
 
 # ==================== 启动 ====================
