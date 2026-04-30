@@ -354,6 +354,43 @@
       transform: translateY(-1px);
     }
 
+    .candidate-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .candidate-btn {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: #fff;
+      color: var(--text);
+      font-family: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .candidate-btn:hover {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px var(--primary-glow);
+    }
+
+    .candidate-name {
+      display: block;
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .candidate-meta {
+      display: block;
+      margin-top: 3px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
     /* ── Footer ── */
     .footer {
       padding: 0 24px 22px;
@@ -550,7 +587,8 @@
       const map = {
         success:     { icon: '✓', title: '签到成功',     cls: 'result-success' },
         already:     { icon: '⏰', title: '已签到',       cls: 'result-already' },
-        not_found:   { icon: '?',  title: '未找到报名信息', cls: 'result-error' }
+        not_found:   { icon: '?',  title: '未找到报名信息', cls: 'result-error' },
+        multiple:    { icon: '?',  title: '请选择参会人',   cls: 'result-already' }
       };
       const m = map[status] || { icon: '✕', title: '签到失败', cls: 'result-error' };
 
@@ -568,6 +606,29 @@
       if (status === 'success' || status === 'already') form.style.display = 'none';
     };
 
+    const showCandidates = (msg, candidates) => {
+      showResult('multiple', msg || '该手机号关联了多位参会人，请选择本人完成签到');
+      const list = document.createElement('div');
+      list.className = 'candidate-list';
+      candidates.forEach((candidate) => {
+        if (!candidate.record_id) return;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'candidate-btn';
+        button.dataset.recordId = candidate.record_id;
+
+        const name = candidate.name || '未填写姓名';
+        const meta = [
+          candidate.seat ? `座位：${candidate.seat}` : '',
+          candidate.signin_status ? `状态：${candidate.signin_status}` : ''
+        ].filter(Boolean).join(' · ') || '点击选择此报名记录';
+
+        button.innerHTML = `<span class="candidate-name">${escapeHtml(name)}</span><span class="candidate-meta">${escapeHtml(meta)}</span>`;
+        list.appendChild(button);
+      });
+      result.appendChild(list);
+    };
+
     const setLoading = (show, text) => {
       if (show) {
         loadingText.textContent = text || '处理中…';
@@ -579,8 +640,7 @@
       }
     };
 
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
+    const submitSignin = async (recordId = '') => {
       if (submitting) return;
 
       const phone = clean(input.value);
@@ -588,22 +648,38 @@
       if (err) { showHint(err, 'error'); input.focus(); return; }
 
       submitting = true;
-      setLoading(true, '正在查询…');
+      setLoading(true, recordId ? '正在签到…' : '正在查询…');
 
       try {
         const body = { phone, bitable_token: TOKEN };
         if (TABLE) body.table_id = TABLE;
+        if (recordId) body.record_id = recordId;
         const res = await fetch(API + '/api/signin', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         });
         const d = await res.json();
         setLoading(false); clearHint();
-        showResult(d.status, d.message, d.name, d.seat, d.first_signin_time, d.register_form_url);
+        if (d.status === 'multiple') {
+          showCandidates(d.message, d.candidates || []);
+        } else {
+          showResult(d.status, d.message, d.name, d.seat, d.first_signin_time, d.register_form_url);
+        }
       } catch {
         setLoading(false);
         showResult('error', '网络异常，请检查后重试');
       } finally { submitting = false; }
+    };
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      submitSignin();
+    });
+
+    result.addEventListener('click', (e) => {
+      const button = e.target.closest('.candidate-btn');
+      if (!button) return;
+      submitSignin(button.dataset.recordId || '');
     });
 
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') form.requestSubmit(); });

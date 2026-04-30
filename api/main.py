@@ -106,7 +106,7 @@ cache = MemoryCache()
 
 class RecordCache:
     """
-    签到记录索引缓存：手机号 → 记录，O(1) 查找。
+    签到记录索引缓存：手机号 → 记录列表，O(1) 查找。
 
     并发安全设计：
     - 每个 bitable_token 持有独立的锁
@@ -138,20 +138,26 @@ class RecordCache:
                 continue
             for p in extract_phone_values(phone_value):
                 normalized = normalize_phone(p)
-                if normalized and normalized not in index:
-                    index[normalized] = record
+                if normalized:
+                    index.setdefault(normalized, []).append(record)
         return index
 
-    def _find_in_index(self, index: dict, phone: str) -> Optional[dict]:
+    def _find_all_in_index(self, index: dict, phone: str) -> list:
         normalized = normalize_phone(phone)
-        record = index.get(normalized)
-        if record:
-            return record
+        records = index.get(normalized)
+        if records:
+            return records
         # 容错：后缀匹配（手机号前缀可能不同）
+        matches = []
+        seen_record_ids = set()
         for key, rec in index.items():
             if key.endswith(normalized) or normalized.endswith(key):
-                return rec
-        return None
+                for item in rec:
+                    record_id = item.get("record_id")
+                    if record_id not in seen_record_ids:
+                        seen_record_ids.add(record_id)
+                        matches.append(item)
+        return matches
 
     def refresh(self, bitable_token: str, table_id: str, phone_field_name: str):
         """
@@ -175,10 +181,24 @@ class RecordCache:
                 logger.warning(f"缓存刷新失败: token={bitable_token}, error={e}")
 
     def find_by_phone(self, bitable_token: str, phone: str) -> Optional[dict]:
+        matches = self.find_all_by_phone(bitable_token, phone)
+        return matches[0] if matches else None
+
+    def find_all_by_phone(self, bitable_token: str, phone: str) -> list:
+        index = cache.get(self._index_key(bitable_token))
+        if not index:
+            return []
+        return self._find_all_in_index(index, phone)
+
+    def find_by_record_id(self, bitable_token: str, record_id: str) -> Optional[dict]:
         index = cache.get(self._index_key(bitable_token))
         if not index:
             return None
-        return self._find_in_index(index, phone)
+        for records in index.values():
+            for record in records:
+                if record.get("record_id") == record_id:
+                    return record
+        return None
 
     def update_record_fields(self, bitable_token: str, phone: str, new_fields: dict):
         """
@@ -190,7 +210,14 @@ class RecordCache:
             index = cache.get(self._index_key(bitable_token))
             if not index:
                 return
-            record = self._find_in_index(index, phone)
+            for record in self._find_all_in_index(index, phone):
+                if record and "fields" in record:
+                    record["fields"].update(new_fields)
+
+    def update_record_fields_by_id(self, bitable_token: str, record_id: str, new_fields: dict):
+        lock = self._get_lock(bitable_token)
+        with lock:
+            record = self.find_by_record_id(bitable_token, record_id)
             if record and "fields" in record:
                 record["fields"].update(new_fields)
 
@@ -441,6 +468,16 @@ def format_timestamp(ts) -> str:
 
 def error_response(message: str, status_code: int = 400):
     return jsonify({"status": "error", "message": message}), status_code
+
+
+def build_candidate(record: dict, name_field_name: str, seat_field_name: str, status_field_name: str) -> dict:
+    fields = record.get("fields", {})
+    return {
+        "record_id": record.get("record_id", ""),
+        "name": extract_name_value(fields.get(name_field_name)) if name_field_name else "",
+        "seat": extract_name_value(fields.get(seat_field_name)) if seat_field_name else "",
+        "signin_status": extract_status_value(fields.get(status_field_name)) if status_field_name else "",
+    }
 
 
 def find_signin_table(bitable_token: str) -> Tuple[str, str]:
@@ -729,7 +766,8 @@ def signin():
     {
         "phone": "13800138000",    // 手机号（必填）
         "bitable_token": "xxx",    // 多维表格 Token（必填）
-        "table_id": "tblxxx"       // 表格 ID（可选，URL 参数传递）
+        "table_id": "tblxxx",      // 表格 ID（可选，URL 参数传递）
+        "record_id": "recxxx"      // 记录 ID（可选，多人共用手机号时二次确认）
     }
     """
     data = request.get_json()
@@ -745,18 +783,19 @@ def signin():
         return error_response("缺少 bitable_token 参数")
 
     request_table_id = data.get("table_id", "").strip()
+    selected_record_id = data.get("record_id", "").strip()
 
     # 同一手机号并发签到防重：非阻塞加锁，重复提交直接拒绝
     signin_lock = _get_signin_lock(bitable_token, phone)
     if not signin_lock.acquire(blocking=False):
         return error_response("签到请求处理中，请勿重复提交", 429)
     try:
-        return _do_signin(phone, bitable_token, request_table_id)
+        return _do_signin(phone, bitable_token, request_table_id, selected_record_id)
     finally:
         signin_lock.release()
 
 
-def _do_signin(phone: str, bitable_token: str, request_table_id: str):
+def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_record_id: str = ""):
     """签到核心逻辑（调用方已持 signin_lock）"""
     try:
         config = get_cached_config(bitable_token)
@@ -831,14 +870,14 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str):
         seat_field_name = config.get("seat_field_name")
 
         # 查找报名记录：优先内存索引，未命中时全量拉取（含雷劈保护）
-        matched_record = None
+        matched_records = []
         if phone_field_name:
-            matched_record = record_cache.find_by_phone(bitable_token, phone)
-            if not matched_record:
+            matched_records = record_cache.find_all_by_phone(bitable_token, phone)
+            if not matched_records:
                 record_cache.refresh(bitable_token, table_id, phone_field_name)
-                matched_record = record_cache.find_by_phone(bitable_token, phone)
+                matched_records = record_cache.find_all_by_phone(bitable_token, phone)
 
-        if not matched_record:
+        if not matched_records:
             result: dict = {
                 "status": "not_found",
                 "message": "未查询到您的报名信息，请检查手机号是否正确",
@@ -847,6 +886,27 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str):
             if form_url:
                 result["register_form_url"] = form_url
             return jsonify(result)
+
+        matched_record = None
+        if selected_record_id:
+            matched_record = next(
+                (record for record in matched_records if record.get("record_id") == selected_record_id),
+                None,
+            )
+            if not matched_record:
+                return error_response("所选报名记录无效，请重新选择", 400)
+        elif len(matched_records) > 1:
+            candidates = [
+                build_candidate(record, name_field_name, seat_field_name, status_field_name)
+                for record in matched_records
+            ]
+            return jsonify({
+                "status": "multiple",
+                "message": "该手机号关联了多位参会人，请选择本人完成签到",
+                "candidates": candidates,
+            })
+        else:
+            matched_record = matched_records[0]
 
         record_id = matched_record["record_id"]
         record_fields = matched_record.get("fields", {})
@@ -886,7 +946,7 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str):
         # 生产环境需确认飞书写入成功后再向用户返回签到成功。
         if update_fields:
             feishu.update_record(bitable_token, table_id, record_id, update_fields)
-            record_cache.update_record_fields(bitable_token, phone, update_fields)
+            record_cache.update_record_fields_by_id(bitable_token, record_id, update_fields)
             logger.info(f"飞书记录已更新: record_id={record_id}")
 
         logger.info(f"签到成功: phone={phone}, record_id={record_id}")
