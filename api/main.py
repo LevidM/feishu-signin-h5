@@ -322,6 +322,23 @@ class FeishuClient:
         )
         return data.get("items", [])
 
+    def get_field(
+        self,
+        bitable_token: str,
+        table_id: str,
+        field_id: str
+    ) -> dict:
+        """获取单个字段的详细信息（含单选项的 options）"""
+        try:
+            data = self.api_request(
+                "GET",
+                f"/bitable/v1/apps/{bitable_token}/tables/{table_id}/fields/{field_id}"
+            )
+            return data.get("field", {})
+        except Exception as e:
+            logger.warning(f"获取字段详情失败: {e}")
+            return {}
+
     def get_view_list(
         self,
         bitable_token: str,
@@ -933,10 +950,19 @@ def signin():
         update_fields = {}
 
         if status_field_name and update_status:
-            # 单选项用选项 ID，否则直接用文本
+            # 单选项用选项 ID，否则实时查询字段详情获取
+            if not status_option_id:
+                field_detail = feishu.get_field(bitable_token, table_id, status_field_id)
+                for opt in (field_detail.get("property") or {}).get("options", []):
+                    opt_name = (opt.get("name") or opt.get("text") or "").strip()
+                    if "已签到" in opt_name:
+                        status_option_id = opt.get("id") or opt.get("option_id")
+                        logger.info(f"查到签到状态选项: {opt_name} -> {status_option_id}")
+                        break
             if status_option_id:
                 update_fields[status_field_name] = status_option_id
             else:
+                logger.warning("未找到已签到选项 ID，直接使用文本")
                 update_fields[status_field_name] = "已签到"
 
         if time_field_name and update_time:
