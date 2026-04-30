@@ -894,7 +894,7 @@ def signin():
         return_name = signin_cfg.get("return_name", True)
         return_seat = signin_cfg.get("return_seat", True)
         success_msg = signin_cfg.get("success_message", "签到成功，欢迎参会！")
-        already_msg = signin_cfg.get("already_message", "您已完成签到，请勿重复提交")
+        already_msg = signin_cfg.get("already_message", "已签到，无需重复签到")
 
         # 检查是否已签到（用字段名读取 record_fields）
         if status_field_name and update_status:
