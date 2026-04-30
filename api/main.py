@@ -221,7 +221,7 @@ class FeishuClient:
         field_id: str,
         field_name: str,
         value: str,
-        page_size: int = 100
+        page_size: int = 1
     ) -> list:
         """根据字段名称搜索记录（更高效）"""
         data = self.api_request(
@@ -696,6 +696,11 @@ def signin():
                 "seat_field_id": seat_field_id,
                 "seat_field_name": seat_field_name,
             }
+            # 保留旧缓存中的 register_form_url（Block 插件传入的报名链接）
+            old_cache = get_cached_config(bitable_token)
+            if old_cache and old_cache.get("register_form_url"):
+                config["register_form_url"] = old_cache["register_form_url"]
+
             set_cached_config(bitable_token, config)
 
         table_id = config["table_id"]
@@ -711,8 +716,8 @@ def signin():
         seat_field_id = config.get("seat_field_id")
         seat_field_name = config.get("seat_field_name")
 
-        # 使用搜索API（传字段名称，非字段ID）
-        if phone_field_id and phone_field_name:
+        # 使用搜索API加速（page_size=1，只查一条，避免全量扫描）
+        if phone_field_name:
             try:
                 normalized_phone = phone.replace(" ", "").replace("-", "")
                 matched_records = feishu.search_records(
@@ -720,7 +725,8 @@ def signin():
                     table_id, 
                     phone_field_id,
                     phone_field_name,
-                    normalized_phone
+                    normalized_phone,
+                    page_size=1
                 )
             except Exception as e:
                 logger.warning(f"搜索API失败，降级到全量获取: {e}")
@@ -728,14 +734,15 @@ def signin():
         else:
             matched_records = []
 
-        # 如果搜索没找到，尝试全量获取
-        if not matched_records and phone_field_id:
+        # 如果搜索没找到，降级到全量获取（字段名作为 key）
+        if not matched_records and phone_field_name:
+            logger.info("使用全量获取降级")
             all_records = feishu.get_records(bitable_token, table_id)
             normalized_phone = phone.replace(" ", "").replace("-", "")
 
             for record in all_records:
                 fields_data = record.get("fields", {})
-                phone_value = fields_data.get(phone_field_id)
+                phone_value = fields_data.get(phone_field_name)  # 用字段名
                 if phone_value:
                     phone_list = extract_phone_values(phone_value)
                     for p in phone_list:
@@ -746,22 +753,23 @@ def signin():
                 if matched_records:
                     break
 
-        # 未找到报名记录
+        # 未找到报名记录（返回报名链接）
         if not matched_records:
             result = {
                 "status": "not_found",
                 "message": "未查询到您的报名信息，请检查手机号是否正确"
             }
-            # 如果有报名表单链接，一并返回
-            if config and config.get("register_form_url"):
-                result["register_form_url"] = config["register_form_url"]
+            # register_form_url 可能从 Block 插件缓存的原始 config 来
+            original_cache = get_cached_config(bitable_token)
+            if original_cache and original_cache.get("register_form_url"):
+                result["register_form_url"] = original_cache["register_form_url"]
             return jsonify(result)
 
         record = matched_records[0]
         record_id = record["record_id"]
         record_fields = record.get("fields", {})
 
-        # 读取签到行为配置（从 Block 插件传入，使用默认值兜底）
+        # 读取签到行为配置
         signin_cfg = (config or {}).get("signin_config") or {}
         update_status = signin_cfg.get("update_signin_status", True)
         update_time = signin_cfg.get("update_signin_time", True)
@@ -770,21 +778,21 @@ def signin():
         success_msg = signin_cfg.get("success_message", "签到成功，欢迎参会！")
         already_msg = signin_cfg.get("already_message", "您已完成签到，请勿重复提交")
 
-        # 检查是否已签到
-        if status_field_id and update_status:
-            current_status = extract_status_value(record_fields.get(status_field_id))
+        # 检查是否已签到（用字段名读取 record_fields）
+        if status_field_name and update_status:
+            current_status = extract_status_value(record_fields.get(status_field_name))
             if current_status in ["已签到", "已签到 "]:
                 first_time = ""
-                if time_field_id:
-                    ts = record_fields.get(time_field_id)
+                if time_field_name:
+                    ts = record_fields.get(time_field_name)
                     if isinstance(ts, (int, float)):
                         first_time = format_timestamp(int(ts))
 
                 return jsonify({
                     "status": "already",
                     "message": already_msg,
-                    "name": extract_name_value(record_fields.get(name_field_id)) if name_field_id and return_name else None,
-                    "seat": extract_name_value(record_fields.get(seat_field_id)) if seat_field_id and return_seat else None,
+                    "name": extract_name_value(record_fields.get(name_field_name)) if name_field_name and return_name else None,
+                    "seat": extract_name_value(record_fields.get(seat_field_name)) if seat_field_name and return_seat else None,
                     "first_signin_time": first_time
                 })
 
@@ -805,8 +813,8 @@ def signin():
         return jsonify({
             "status": "success",
             "message": success_msg,
-            "name": extract_name_value(record_fields.get(name_field_id)) if name_field_id and return_name else None,
-            "seat": extract_name_value(record_fields.get(seat_field_id)) if seat_field_id and return_seat else None,
+            "name": extract_name_value(record_fields.get(name_field_name)) if name_field_name and return_name else None,
+            "seat": extract_name_value(record_fields.get(seat_field_name)) if seat_field_name and return_seat else None,
             "record_id": record_id
         })
 
