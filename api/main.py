@@ -703,9 +703,13 @@ def signin():
         phone_field_id = config.get("phone_field_id")
         phone_field_name = config.get("phone_field_name")
         status_field_id = config.get("status_field_id")
+        status_field_name = config.get("status_field_name")
         time_field_id = config.get("time_field_id")
+        time_field_name = config.get("time_field_name")
         name_field_id = config.get("name_field_id")
+        name_field_name = config.get("name_field_name")
         seat_field_id = config.get("seat_field_id")
+        seat_field_name = config.get("seat_field_name")
 
         # 使用搜索API（传字段名称，非字段ID）
         if phone_field_id and phone_field_name:
@@ -784,14 +788,14 @@ def signin():
                     "first_signin_time": first_time
                 })
 
-        # 执行签到
+        # 执行签到（用字段名称作为 key）
         update_fields = {}
 
-        if status_field_id and update_status:
-            update_fields[status_field_id] = "已签到"
+        if status_field_name and update_status:
+            update_fields[status_field_name] = "已签到"
 
-        if time_field_id and update_time:
-            update_fields[time_field_id] = datetime.now().timestamp() * 1000  # 毫秒
+        if time_field_name and update_time:
+            update_fields[time_field_name] = datetime.now().timestamp() * 1000  # 毫秒
 
         feishu.update_record(bitable_token, table_id, record_id, update_fields)
 
