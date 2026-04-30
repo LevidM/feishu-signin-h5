@@ -101,6 +101,48 @@ class MemoryCache:
 # 全局缓存实例
 cache = MemoryCache()
 
+
+class RecordCache:
+    """签到记录缓存：预加载整表记录，后续签到秒级响应"""
+    
+    CACHE_KEY_PREFIX = "records_"
+    CACHE_TTL = 600  # 缓存10分钟，过期自动刷新
+    
+    def get_records(self, bitable_token: str) -> Optional[list]:
+        return cache.get(f"{self.CACHE_KEY_PREFIX}{bitable_token}")
+    
+    def set_records(self, bitable_token: str, records: list):
+        cache.set(f"{self.CACHE_KEY_PREFIX}{bitable_token}", records, ttl_seconds=self.CACHE_TTL)
+    
+    def refresh(self, bitable_token: str, table_id: str):
+        """拉取全量记录并刷新缓存"""
+        try:
+            all_records = feishu.get_records(bitable_token, table_id, page_size=500)
+            self.set_records(bitable_token, all_records)
+            logger.info(f"记录缓存刷新完成: {bitable_token}, 共 {len(all_records)} 条")
+        except Exception as e:
+            logger.warning(f"记录缓存刷新失败: {e}")
+    
+    def find_by_phone(self, bitable_token: str, phone_field_name: str, phone: str) -> Optional[dict]:
+        """在缓存的记录中按手机号查找，返回找到的记录或 None"""
+        records = self.get_records(bitable_token)
+        if not records:
+            return None
+        
+        normalized = phone.replace(" ", "").replace("-", "")
+        for record in records:
+            fields_data = record.get("fields", {})
+            phone_value = fields_data.get(phone_field_name)
+            if phone_value:
+                phone_list = extract_phone_values(phone_value)
+                for p in phone_list:
+                    pn = p.replace(" ", "").replace("-", "")
+                    if pn.endswith(normalized) or normalized.endswith(pn):
+                        return record
+        return None
+
+record_cache = RecordCache()
+
 # ==================== 飞书 API 客户端 ====================
 
 class RateLimiter:
@@ -267,6 +309,19 @@ class FeishuClient:
         data = self.api_request(
             "GET",
             f"/bitable/v1/apps/{bitable_token}/tables/{table_id}/fields"
+        )
+        return data.get("items", [])
+
+    def get_view_list(
+        self,
+        bitable_token: str,
+        table_id: str
+    ) -> list:
+        """获取视图列表"""
+        data = self.api_request(
+            "GET",
+            f"/bitable/v1/apps/{bitable_token}/tables/{table_id}/views",
+            params={"page_size": 50}
         )
         return data.get("items", [])
 
@@ -442,6 +497,24 @@ def find_signin_table(bitable_token: str) -> Tuple[str, str]:
     return first["table_id"], first.get("name", "未命名表格")
 
 
+def detect_form_url(bitable_token: str, table_id: str, table_name: str = "") -> str:
+    """
+    检测表格中的表单视图，返回外部可访问的表单 URL。
+    如果找不到表单视图或 API 调用失败，返回空字符串。
+    """
+    try:
+        views = feishu.get_view_list(bitable_token, table_id)
+        for view in views:
+            # view_type: 2=表格, 3=表单, 4=日历, ...
+            if view.get("view_type") == 3:
+                view_id = view["view_id"]
+                # 构造表单 URL
+                return f"https://bytedance.feishu.cn/base/{bitable_token}/form/{view_id}"
+    except Exception as e:
+        logger.warning(f"检测表单视图失败: {e}")
+    return ""
+
+
 # ==================== API 路由 ====================
 
 @app.route("/health")
@@ -511,6 +584,10 @@ def plugin_register():
         if cache_data:
             set_cached_config(bitable_token, cache_data)
             logger.info(f"缓存签到配置: {cache_data}")
+
+        # 预加载签到记录到缓存（打开插件即准备，第一个签到者不用等）
+        if table_id:
+            record_cache.refresh(bitable_token, table_id)
 
         # 生成签到 URL（包含 table_id，便于直接访问时使用）
         signin_url = generate_signin_url(bitable_token)
@@ -700,6 +777,11 @@ def signin():
             old_cache = get_cached_config(bitable_token)
             if old_cache and old_cache.get("register_form_url"):
                 config["register_form_url"] = old_cache["register_form_url"]
+            else:
+                # 没有旧缓存时，自动检测表格中的表单视图
+                form_url = detect_form_url(bitable_token, table_id)
+                if form_url:
+                    config["register_form_url"] = form_url
 
             set_cached_config(bitable_token, config)
 
@@ -716,24 +798,23 @@ def signin():
         seat_field_id = config.get("seat_field_id")
         seat_field_name = config.get("seat_field_name")
 
-        # 搜索报名记录（精确搜索，只查一条）
-        matched_records = []
+        # 查找报名记录（优先内存缓存，再拉取全量）
+        matched_record = None
         if phone_field_name:
-            try:
-                normalized_phone = phone.replace(" ", "").replace("-", "")
-                matched_records = feishu.search_records(
-                    bitable_token, 
-                    table_id, 
-                    phone_field_id,
-                    phone_field_name,
-                    normalized_phone,
-                    page_size=1
-                )
-            except Exception as e:
-                logger.error(f"搜索记录失败: {e}")
+            normalized_phone = phone.replace(" ", "").replace("-", "")
+            
+            # 1) 先在缓存中查找（瞬时返回）
+            matched_record = record_cache.find_by_phone(bitable_token, phone_field_name, phone)
+            
+            # 2) 缓存未命中，拉取全量记录并缓存
+            if not matched_record:
+                logger.info(f"预加载记录: {bitable_token}")
+                all_records = feishu.get_records(bitable_token, table_id, page_size=500)
+                record_cache.set_records(bitable_token, all_records)
+                matched_record = record_cache.find_by_phone(bitable_token, phone_field_name, phone)
 
         # 未找到报名记录（返回报名链接）
-        if not matched_records:
+        if not matched_record:
             result = {
                 "status": "not_found",
                 "message": "未查询到您的报名信息，请检查手机号是否正确"
@@ -744,7 +825,7 @@ def signin():
                 result["register_form_url"] = original_cache["register_form_url"]
             return jsonify(result)
 
-        record = matched_records[0]
+        record = matched_record
         record_id = record["record_id"]
         record_fields = record.get("fields", {})
 
