@@ -180,6 +180,15 @@ class RecordCache:
             except Exception as e:
                 logger.warning(f"缓存刷新失败: token={bitable_token}, error={e}")
 
+    def has_index(self, bitable_token: str) -> bool:
+        return cache.get(self._index_key(bitable_token)) is not None
+
+    def records_count(self, bitable_token: str) -> int:
+        index = cache.get(self._index_key(bitable_token))
+        if not index:
+            return 0
+        return sum(len(records) for records in index.values())
+
     def find_by_phone(self, bitable_token: str, phone: str) -> Optional[dict]:
         matches = self.find_all_by_phone(bitable_token, phone)
         return matches[0] if matches else None
@@ -459,6 +468,17 @@ def extract_status_value(value) -> str:
     return ""
 
 
+def detect_phone_field_name(fields: list) -> str:
+    return next(
+        (
+            f["field_name"]
+            for f in fields
+            if "手机" in f["field_name"] or "phone" in f["field_name"].lower()
+        ),
+        "",
+    )
+
+
 def format_timestamp(ts) -> str:
     try:
         return datetime.fromtimestamp(int(ts) / 1000).strftime("%Y-%m-%d %H:%M:%S")
@@ -478,6 +498,31 @@ def build_candidate(record: dict, name_field_name: str, seat_field_name: str, st
         "seat": extract_name_value(fields.get(seat_field_name)) if seat_field_name else "",
         "signin_status": extract_status_value(fields.get(status_field_name)) if status_field_name else "",
     }
+
+
+def start_record_cache_preload(
+    bitable_token: str,
+    table_id: str,
+    phone_field_name: str = "",
+) -> bool:
+    if not bitable_token or not table_id or record_cache.has_index(bitable_token):
+        return False
+
+    def _preload():
+        try:
+            resolved_phone_field = phone_field_name
+            if not resolved_phone_field:
+                fields = feishu.get_field_list(bitable_token, table_id)
+                resolved_phone_field = detect_phone_field_name(fields)
+            if not resolved_phone_field:
+                logger.warning(f"缓存预热跳过，未找到手机号字段: token={bitable_token}, table={table_id}")
+                return
+            record_cache.refresh(bitable_token, table_id, resolved_phone_field)
+        except Exception as e:
+            logger.warning(f"缓存预热失败: token={bitable_token}, table={table_id}, error={e}")
+
+    threading.Thread(target=_preload, daemon=True).start()
+    return True
 
 
 def find_signin_table(bitable_token: str) -> Tuple[str, str]:
@@ -569,10 +614,48 @@ def cache_status():
     return jsonify({
         "ok": True,
         "config_cached": bool(config and "fields" in config),
-        "records_cached": bool(index),
-        "records_count": len(index) if index else 0,
+        "records_cached": record_cache.has_index(bitable_token),
+        "records_count": record_cache.records_count(bitable_token),
+        "phone_keys_count": len(index) if index else 0,
         "config_keys": list(config.keys()) if config else [],
     })
+
+
+@app.route("/api/cache/preload", methods=["POST"])
+@rate_limit_check()
+def cache_preload():
+    """
+    主动预热手机号索引缓存。活动开始前调用一次，可避免首个签到用户承担全量拉取耗时。
+    """
+    data = request.get_json() or {}
+    bitable_token = data.get("bitable_token", "").strip()
+    if not bitable_token:
+        return error_response("缺少 bitable_token 参数")
+
+    try:
+        request_table_id = data.get("table_id", "").strip()
+        config = get_cached_config(bitable_token) or {}
+        table_id = request_table_id or config.get("table_id", "")
+        if not table_id:
+            table_id, _ = find_signin_table(bitable_token)
+
+        phone_field_name = config.get("phone_field_name", "")
+        if not phone_field_name:
+            fields = feishu.get_field_list(bitable_token, table_id)
+            phone_field_name = detect_phone_field_name(fields)
+        if not phone_field_name:
+            return error_response("未找到手机号字段，无法预热缓存", 400)
+
+        started = start_record_cache_preload(bitable_token, table_id, phone_field_name)
+        return jsonify({
+            "success": True,
+            "started": started,
+            "already_cached": not started and record_cache.has_index(bitable_token),
+            "table_id": table_id,
+        })
+    except Exception as e:
+        logger.error(f"缓存预热接口失败: {e}")
+        return error_response("缓存预热失败，请检查表格权限和字段配置", 500)
 
 
 @app.route("/api/plugin/register", methods=["POST"])
@@ -622,22 +705,8 @@ def plugin_register():
             set_cached_config(bitable_token, cache_data)
             logger.info(f"缓存签到配置: token={bitable_token}")
 
-        # 异步预热记录缓存，不阻塞插件注册响应
         if table_id:
-            def _preload():
-                try:
-                    fields = feishu.get_field_list(bitable_token, table_id)
-                    phone_field = next(
-                        (f["field_name"] for f in fields
-                         if "手机" in f["field_name"] or "phone" in f["field_name"].lower()),
-                        None,
-                    )
-                    if phone_field:
-                        record_cache.refresh(bitable_token, table_id, phone_field)
-                except Exception as e:
-                    logger.warning(f"插件预热失败: token={bitable_token}, error={e}")
-
-            threading.Thread(target=_preload, daemon=True).start()
+            start_record_cache_preload(bitable_token, table_id)
 
         signin_url = generate_signin_url(bitable_token)
         if table_id:
@@ -673,6 +742,11 @@ def get_config():
         config = get_cached_config(bitable_token)
 
         if config and "fields" in config:
+            start_record_cache_preload(
+                bitable_token,
+                config.get("table_id", ""),
+                config.get("phone_field_name", ""),
+            )
             return jsonify({
                 "success": True,
                 "cached": True,
@@ -749,6 +823,7 @@ def get_config():
             "seat_field_name": seat_field_name,
         })
         set_cached_config(bitable_token, cached_config)
+        start_record_cache_preload(bitable_token, table_id, phone_field_name or "")
 
         return jsonify(response_data)
     except Exception as e:
