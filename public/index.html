@@ -503,6 +503,17 @@
     const footer = document.getElementById('tableName');
 
     const clean = (v) => v.trim().replace(/[\s\-()]+/g, '');
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+    const safeUrl = (value) => {
+      try {
+        const url = new URL(value, window.location.origin);
+        return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+      } catch {
+        return '';
+      }
+    };
     const vMsg = (v) => {
       const c = clean(v);
       if (!c) return '请输入手机号码';
@@ -543,12 +554,13 @@
       };
       const m = map[status] || { icon: '✕', title: '签到失败', cls: 'result-error' };
 
-      let html = `<div class="icon">${m.icon}</div><h3>${m.title}</h3><p>${msg}</p>`;
-      if (name) html += `<div class="name">${name}</div>`;
-      if (seat) html += `<div class="seat">${seat}</div>`;
-      if (time) html += `<div class="time">${time}</div>`;
-      if (status === 'not_found' && regUrl) {
-        html += `<div><a class="register-link" href="${regUrl}" target="_blank" rel="noopener">去报名</a></div>`;
+      let html = `<div class="icon">${escapeHtml(m.icon)}</div><h3>${escapeHtml(m.title)}</h3><p>${escapeHtml(msg)}</p>`;
+      if (name) html += `<div class="name">${escapeHtml(name)}</div>`;
+      if (seat) html += `<div class="seat">${escapeHtml(seat)}</div>`;
+      if (time) html += `<div class="time">${escapeHtml(time)}</div>`;
+      const registerUrl = safeUrl(regUrl);
+      if (status === 'not_found' && registerUrl) {
+        html += `<div><a class="register-link" href="${escapeHtml(registerUrl)}" target="_blank" rel="noopener">去报名</a></div>`;
       }
 
       result.className = 'result show ' + m.cls;
@@ -601,6 +613,12 @@
 
     // Init
     (async () => {
+      if (!TOKEN) {
+        form.style.display = 'none';
+        showResult('error', '签到链接缺少 app 参数，请联系现场工作人员');
+        return;
+      }
+
       if (TOKEN) {
         try {
           const body = { bitable_token: TOKEN };

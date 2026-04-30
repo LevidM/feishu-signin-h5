@@ -36,6 +36,7 @@ H5 后端的 /api/plugin/register 变为可选验证接口。
 import os
 import time
 import logging
+import re
 from datetime import datetime, timedelta
 from functools import wraps
 from typing import Optional, Tuple, Dict, List
@@ -64,6 +65,14 @@ FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 SIGNIN_BASE_URL = os.getenv("SIGNIN_BASE_URL", "").rstrip("/")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+if not DEBUG and (not FEISHU_APP_ID or not FEISHU_APP_SECRET):
+    raise RuntimeError("生产环境必须配置 FEISHU_APP_ID 和 FEISHU_APP_SECRET")
 
 # ==================== 内存缓存 ====================
 
@@ -128,13 +137,13 @@ class RecordCache:
             if not phone_value:
                 continue
             for p in extract_phone_values(phone_value):
-                normalized = p.replace(" ", "").replace("-", "")
+                normalized = normalize_phone(p)
                 if normalized and normalized not in index:
                     index[normalized] = record
         return index
 
     def _find_in_index(self, index: dict, phone: str) -> Optional[dict]:
-        normalized = phone.replace(" ", "").replace("-", "")
+        normalized = normalize_phone(phone)
         record = index.get(normalized)
         if record:
             return record
@@ -238,6 +247,7 @@ class FeishuClient:
                 json={"app_id": self.app_id, "app_secret": self.app_secret},
                 timeout=30.0,
             )
+            response.raise_for_status()
             data = response.json()
             if data.get("code") != 0:
                 raise Exception(f"获取飞书 Access Token 失败: {data.get('msg')}")
@@ -260,6 +270,7 @@ class FeishuClient:
             timeout=timeout,
             **kwargs,
         )
+        response.raise_for_status()
         data = response.json()
         if data.get("code") != 0:
             logger.error(f"飞书 API 错误: path={path}, code={data.get('code')}, msg={data.get('msg')}")
@@ -323,7 +334,10 @@ feishu = FeishuClient(FEISHU_APP_ID, FEISHU_APP_SECRET)
 # ==================== Flask 应用 ====================
 
 app = Flask(__name__, static_folder="public", static_url_path="")
-CORS(app)
+if ALLOWED_ORIGINS:
+    CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}, r"/health": {"origins": ALLOWED_ORIGINS}})
+elif DEBUG:
+    CORS(app)
 
 # 每手机号签到锁：防止同一手机号并发重复提交
 _signin_locks: Dict[str, Lock] = {}
@@ -331,7 +345,7 @@ _signin_locks_guard = Lock()
 
 
 def _get_signin_lock(bitable_token: str, phone: str) -> Lock:
-    key = f"{bitable_token}:{phone.replace(' ', '').replace('-', '')}"
+    key = f"{bitable_token}:{normalize_phone(phone)}"
     with _signin_locks_guard:
         if key not in _signin_locks:
             _signin_locks[key] = Lock()
@@ -351,6 +365,15 @@ def rate_limit_check():
             return f(*args, **kwargs)
         return wrapped
     return decorator
+
+
+def normalize_phone(phone: str) -> str:
+    return re.sub(r"[\s\-()]+", "", (phone or "").strip())
+
+
+def is_valid_phone(phone: str) -> bool:
+    normalized = normalize_phone(phone)
+    return bool(re.fullmatch(r"\+?\d{7,15}", normalized))
 
 
 def generate_signin_url(bitable_token: str) -> str:
@@ -499,6 +522,8 @@ def health_check():
 
 @app.route("/api/cache/status", methods=["GET"])
 def cache_status():
+    if not DEBUG:
+        return error_response("Not found", 404)
     bitable_token = request.args.get("token", "").strip()
     if not bitable_token:
         return jsonify({"error": "请提供 ?token=xxx 参数"})
@@ -634,6 +659,25 @@ def get_config():
 
         fields = feishu.get_field_list(bitable_token, table_id)
         field_map = {f["field_name"]: f["field_id"] for f in fields}
+        phone_field_name = status_field_name = time_field_name = None
+        name_field_name = seat_field_name = None
+        phone_field_id = status_field_id = time_field_id = None
+        name_field_id = seat_field_id = None
+
+        for f in fields:
+            fname = f["field_name"]
+            fid = f["field_id"]
+            fname_lower = fname.lower()
+            if "手机" in fname or "phone" in fname_lower:
+                phone_field_id, phone_field_name = fid, fname
+            elif "签到状态" in fname or "status" in fname_lower:
+                status_field_id, status_field_name = fid, fname
+            elif "签到时间" in fname or "time" in fname_lower:
+                time_field_id, time_field_name = fid, fname
+            elif "姓名" in fname or "name" in fname_lower:
+                name_field_id, name_field_name = fid, fname
+            elif "坐席" in fname or "seat" in fname_lower or "座位" in fname:
+                seat_field_id, seat_field_name = fid, fname
 
         try:
             table_list = feishu.get_table_list(bitable_token)
@@ -643,7 +687,7 @@ def get_config():
         except Exception:
             table_name = ""
 
-        return jsonify({
+        response_data = {
             "success": True,
             "cached": False,
             "bitable_token": bitable_token,
@@ -651,7 +695,25 @@ def get_config():
             "table_name": table_name,
             "fields": field_map,
             "register_form_url": register_form_url,
+        }
+
+        cached_config = dict(config or {})
+        cached_config.update(response_data)
+        cached_config.update({
+            "phone_field_id": phone_field_id,
+            "phone_field_name": phone_field_name,
+            "status_field_id": status_field_id,
+            "status_field_name": status_field_name,
+            "time_field_id": time_field_id,
+            "time_field_name": time_field_name,
+            "name_field_id": name_field_id,
+            "name_field_name": name_field_name,
+            "seat_field_id": seat_field_id,
+            "seat_field_name": seat_field_name,
         })
+        set_cached_config(bitable_token, cached_config)
+
+        return jsonify(response_data)
     except Exception as e:
         logger.error(f"获取配置失败: {e}")
         return error_response(str(e), 500)
@@ -674,8 +736,8 @@ def signin():
     if not data:
         return error_response("请求数据格式错误")
 
-    phone = data.get("phone", "").strip()
-    if not phone or len(phone) < 7:
+    phone = normalize_phone(data.get("phone", ""))
+    if not is_valid_phone(phone):
         return error_response("请输入正确的手机号码")
 
     bitable_token = data.get("bitable_token", "").strip()
@@ -728,7 +790,7 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str):
                     time_field_id, time_field_name = fid, fname
                 elif "姓名" in fname or "name" in fname_lower:
                     name_field_id, name_field_name = fid, fname
-                elif "坐席" in fname or "seat" in fname_lower:
+                elif "坐席" in fname or "seat" in fname_lower or "座位" in fname:
                     seat_field_id, seat_field_name = fid, fname
 
             # 保留旧缓存中插件提供的报名链接和签到行为配置
@@ -821,20 +883,11 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str):
         if time_field_name and update_time:
             update_fields[time_field_name] = int(datetime.now().timestamp() * 1000)
 
-        # 立即更新内存索引，确保 signin_lock 释放后再次签到能被识别
+        # 生产环境需确认飞书写入成功后再向用户返回签到成功。
         if update_fields:
+            feishu.update_record(bitable_token, table_id, record_id, update_fields)
             record_cache.update_record_fields(bitable_token, phone, update_fields)
-
-        # 异步写入飞书，不阻塞用户响应
-        if update_fields:
-            def _do_update():
-                try:
-                    feishu.update_record(bitable_token, table_id, record_id, update_fields)
-                    logger.info(f"飞书记录已更新: record_id={record_id}")
-                except Exception as e:
-                    logger.error(f"飞书记录更新失败: record_id={record_id}, error={e}")
-
-            threading.Thread(target=_do_update, daemon=True).start()
+            logger.info(f"飞书记录已更新: record_id={record_id}")
 
         logger.info(f"签到成功: phone={phone}, record_id={record_id}")
         return jsonify({

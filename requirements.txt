@@ -1,5 +1,6 @@
-# Python 3.6 兼容版本
+# 后端运行依赖
 flask==2.0.3
+Werkzeug==2.0.3
 flask-cors==3.0.10
 httpx==0.22.0
 python-dotenv==0.20.0
