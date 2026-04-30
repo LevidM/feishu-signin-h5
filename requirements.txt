@@ -1,7 +1,7 @@
 # Python 3.6 兼容版本
 flask==2.0.3
 flask-cors==3.0.10
-httpx==0.23.3
-python-dotenv==0.21.1
+httpx==0.22.0
+python-dotenv==0.20.0
 gunicorn==21.2.0
-qrcode[pil]==7.4.2
+qrcode[pil]==7.3.1
