@@ -219,10 +219,11 @@ class FeishuClient:
         bitable_token: str,
         table_id: str,
         field_id: str,
+        field_name: str,
         value: str,
         page_size: int = 100
     ) -> list:
-        """根据字段搜索记录（更高效）"""
+        """根据字段名称搜索记录（更高效）"""
         data = self.api_request(
             "POST",
             f"/bitable/v1/apps/{bitable_token}/tables/{table_id}/records/search",
@@ -232,7 +233,7 @@ class FeishuClient:
                     "conjunction": "and",
                     "conditions": [
                         {
-                            "field_name": field_id,
+                            "field_name": field_name,  # 传字段名称，非字段 ID
                             "operator": "contains",
                             "value": [value]
                         }
@@ -654,56 +655,71 @@ def signin():
             
             fields = feishu.get_field_list(bitable_token, table_id)
             
-            # 构建字段映射
+            # 构建字段映射（同时存 ID 和名称，飞书 search API 需要传字段名称）
             field_map = {f["field_name"]: f["field_id"] for f in fields}
-            phone_field_id = status_field_id = time_field_id = name_field_id = seat_field_id = None
+            phone_field_id = phone_field_name = None
+            status_field_id = status_field_name = None
+            time_field_id = time_field_name = None
+            name_field_id = name_field_name = None
+            seat_field_id = seat_field_name = None
 
             for name, fid in field_map.items():
                 name_lower = name.lower()
                 if "手机" in name or "phone" in name_lower:
                     phone_field_id = fid
+                    phone_field_name = name
                 elif "签到状态" in name or "status" in name_lower:
                     status_field_id = fid
+                    status_field_name = name
                 elif "签到时间" in name or "time" in name_lower:
                     time_field_id = fid
+                    time_field_name = name
                 elif "姓名" in name or "name" in name_lower:
                     name_field_id = fid
+                    name_field_name = name
                 elif "坐席" in name or "seat" in name_lower:
                     seat_field_id = fid
+                    seat_field_name = name
 
             config = {
                 "bitable_token": bitable_token,
                 "table_id": table_id,
                 "fields": field_map,
                 "phone_field_id": phone_field_id,
+                "phone_field_name": phone_field_name,
                 "status_field_id": status_field_id,
+                "status_field_name": status_field_name,
                 "time_field_id": time_field_id,
+                "time_field_name": time_field_name,
                 "name_field_id": name_field_id,
-                "seat_field_id": seat_field_id
+                "name_field_name": name_field_name,
+                "seat_field_id": seat_field_id,
+                "seat_field_name": seat_field_name,
             }
             set_cached_config(bitable_token, config)
 
         table_id = config["table_id"]
         field_map = config["fields"]
-        phone_field_id = config["phone_field_id"]
-        status_field_id = config["status_field_id"]
-        time_field_id = config["time_field_id"]
-        name_field_id = config["name_field_id"]
-        seat_field_id = config["seat_field_id"]
+        phone_field_id = config.get("phone_field_id")
+        phone_field_name = config.get("phone_field_name")
+        status_field_id = config.get("status_field_id")
+        time_field_id = config.get("time_field_id")
+        name_field_id = config.get("name_field_id")
+        seat_field_id = config.get("seat_field_id")
 
-        # 使用搜索API而不是全量获取（更高效，减少API调用）
-        if phone_field_id:
+        # 使用搜索API（传字段名称，非字段ID）
+        if phone_field_id and phone_field_name:
             try:
-                # 尝试使用搜索API
                 normalized_phone = phone.replace(" ", "").replace("-", "")
                 matched_records = feishu.search_records(
                     bitable_token, 
                     table_id, 
-                    phone_field_id, 
+                    phone_field_id,
+                    phone_field_name,
                     normalized_phone
                 )
-            except:
-                # 搜索API失败，降级到全量获取
+            except Exception as e:
+                logger.warning(f"搜索API失败，降级到全量获取: {e}")
                 matched_records = []
         else:
             matched_records = []

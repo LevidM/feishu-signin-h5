@@ -104,7 +104,7 @@ cp .env.example .env
 # 编辑 .env 填入飞书 App ID 和 Secret
 
 # 启动服务
-python api/main.py
+python3 api/main.py
 ```
 
 ### 3. Block 插件生成签到页
