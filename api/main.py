@@ -515,10 +515,11 @@ def detect_form_url(bitable_token: str, table_id: str, table_name: str = "") -> 
     try:
         views = feishu.get_view_list(bitable_token, table_id)
         for view in views:
-            # view_type: 2=表格, 3=表单, 4=日历, ...
-            if view.get("view_type") == 3:
+            # view_type: "form"(Open API) 或 3(Block SDK)
+            vt = view.get("view_type")
+            if vt == "form" or vt == 3 or view.get("type") == 3:
                 view_id = view["view_id"]
-                # 构造表单 URL
+                # 构造表单 URL（外部用户可能需开启"链接无需登录"）
                 return f"https://bytedance.feishu.cn/base/{bitable_token}/form/{view_id}"
     except Exception as e:
         logger.warning(f"检测表单视图失败: {e}")
@@ -695,6 +696,10 @@ def get_config():
             register_form_url = config.get("register_form_url", "")
         else:
             table_id, _ = find_signin_table(bitable_token)
+
+        # 如果还没找到注册表单 URL，自动检测
+        if not register_form_url:
+            register_form_url = detect_form_url(bitable_token, table_id)
 
         fields = feishu.get_field_list(bitable_token, table_id)
 
