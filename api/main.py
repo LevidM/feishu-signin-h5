@@ -481,6 +481,22 @@ rate_limiter = RateLimiter(max_requests=API_RATE_LIMIT_MAX, window_seconds=API_R
 
 # ==================== 飞书 API 客户端 ====================
 
+class FeishuApiError(Exception):
+    def __init__(self, message: str, code=None, status_code: int = 0):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
+def is_feishu_not_found_error(error: Exception) -> bool:
+    if isinstance(error, FeishuApiError):
+        if error.status_code == 404:
+            return True
+        if str(error.code) in {"1254040", "1254041", "1254042", "1254043", "1254044", "1254045"}:
+            return True
+    return False
+
+
 class FeishuClient:
     """飞书 Open API 客户端，线程安全"""
 
@@ -545,13 +561,19 @@ class FeishuClient:
                         delay = FEISHU_API_RETRY_BASE_DELAY * (2 ** attempt)
                     time.sleep(delay)
                     continue
-            response.raise_for_status()
-            data = response.json()
+            try:
+                data = response.json()
+            except Exception:
+                data = {}
+            if response.status_code >= 400:
+                msg = data.get("msg") or response.text or "HTTP 请求失败"
+                logger.error(f"飞书 HTTP 错误: path={path}, status={response.status_code}, msg={msg}")
+                raise FeishuApiError(msg, code=data.get("code"), status_code=response.status_code)
             if data.get("code") == 0:
                 return data.get("data", {})
             logger.error(f"飞书 API 错误: path={path}, code={data.get('code')}, msg={data.get('msg')}")
-            raise Exception(data.get("msg", "API 请求失败"))
-        raise Exception("飞书 API 请求失败")
+            raise FeishuApiError(data.get("msg", "API 请求失败"), code=data.get("code"), status_code=response.status_code)
+        raise FeishuApiError("飞书 API 请求失败")
 
     def get_records(
         self,
@@ -670,6 +692,22 @@ class FeishuClient:
             timeout=FEISHU_WRITE_TIMEOUT,
             json={"fields": fields},
         )
+
+    def get_record(
+        self,
+        bitable_token: str,
+        table_id: str,
+        record_id: str,
+    ) -> dict:
+        data = self.api_request(
+            "GET",
+            f"/bitable/v1/apps/{bitable_token}/tables/{table_id}/records/{record_id}",
+            timeout=FEISHU_SEARCH_TIMEOUT,
+        )
+        record = data.get("record") or data.get("item") or data
+        if record and not record.get("record_id"):
+            record["record_id"] = record_id
+        return record
 
     def get_field_list(self, bitable_token: str, table_id: str) -> list:
         data = self.api_request(
@@ -1354,9 +1392,37 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
             cached_ids = {record.get("record_id") for record in records if record.get("record_id")}
             fresh_ids = {record.get("record_id") for record in fresh_records if record.get("record_id")}
             stale_ids = cached_ids - fresh_ids
+            verified_records = []
+            missing_ids = set()
             if stale_ids:
-                record_cache.remove_record_ids(bitable_token, table_id, stale_ids)
-                logger.info(f"已清理失效报名缓存: phone={phone}, stale_record_ids={list(stale_ids)}")
+                # 手机号搜索可能受字段格式影响。只有 record_id 直查也确认不存在时，才删除缓存。
+                for stale_id in stale_ids:
+                    try:
+                        verified_record = feishu.get_record(
+                            bitable_token,
+                            table_id,
+                            stale_id,
+                        )
+                        if verified_record:
+                            verified_records.append(verified_record)
+                    except Exception as e:
+                        if is_feishu_not_found_error(e):
+                            missing_ids.add(stale_id)
+                        else:
+                            logger.warning(
+                                f"缓存记录直查校验失败，保留缓存: phone={phone}, "
+                                f"record_id={stale_id}, error={e}"
+                            )
+                            cached_record = next(
+                                (record for record in records if record.get("record_id") == stale_id),
+                                None,
+                            )
+                            if cached_record:
+                                verified_records.append(cached_record)
+                if missing_ids:
+                    record_cache.remove_record_ids(bitable_token, table_id, missing_ids)
+                    logger.info(f"已清理失效报名缓存: phone={phone}, stale_record_ids={list(missing_ids)}")
+            fresh_records.extend(verified_records)
             if fresh_records:
                 record_cache.upsert_records(bitable_token, table_id, phone_field_name, fresh_records)
             return fresh_records, True
