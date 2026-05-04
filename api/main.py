@@ -73,6 +73,8 @@ CACHE_BACKEND = os.getenv("CACHE_BACKEND", "auto").strip().lower()
 CONFIG_CACHE_TTL = int(os.getenv("CONFIG_CACHE_TTL", "21600"))
 RECORD_CACHE_TTL = int(os.getenv("RECORD_CACHE_TTL", "21600"))
 MISS_REFRESH_COOLDOWN = int(os.getenv("MISS_REFRESH_COOLDOWN", "60"))
+FEISHU_API_MAX_RETRIES = int(os.getenv("FEISHU_API_MAX_RETRIES", "2"))
+FEISHU_API_RETRY_BASE_DELAY = float(os.getenv("FEISHU_API_RETRY_BASE_DELAY", "0.4"))
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
@@ -231,14 +233,16 @@ class RecordCache:
     CACHE_KEY_PREFIX = "idx_"
     CACHE_TTL = RECORD_CACHE_TTL
 
-    def _index_key(self, bitable_token: str) -> str:
-        return f"{self.CACHE_KEY_PREFIX}{bitable_token}"
+    def _index_key(self, bitable_token: str, table_id: str = "") -> str:
+        suffix = f"{bitable_token}:{table_id}" if table_id else bitable_token
+        return f"{self.CACHE_KEY_PREFIX}{suffix}"
 
-    def _lock_key(self, bitable_token: str) -> str:
-        return f"record_index:{bitable_token}"
+    def _lock_key(self, bitable_token: str, table_id: str = "") -> str:
+        suffix = f"{bitable_token}:{table_id}" if table_id else bitable_token
+        return f"record_index:{suffix}"
 
-    def _miss_refresh_key(self, bitable_token: str) -> str:
-        return f"miss_refresh_{bitable_token}"
+    def _miss_refresh_key(self, bitable_token: str, table_id: str) -> str:
+        return f"miss_refresh_{bitable_token}:{table_id}"
 
     def _build_index(self, records: list, phone_field_name: str) -> dict:
         index = {}
@@ -274,17 +278,17 @@ class RecordCache:
         全量拉取并重建索引。
         持锁期间若其他线程已刷新完成，直接返回，避免重复拉取（雷劈效应）。
         """
-        lock_token = lock_manager.acquire(self._lock_key(bitable_token), ttl_seconds=300, wait_timeout=30)
+        lock_token = lock_manager.acquire(self._lock_key(bitable_token, table_id), ttl_seconds=300, wait_timeout=30)
         if not lock_token:
             logger.warning(f"缓存刷新锁获取失败: token={bitable_token}")
             return
         try:
             # double-check：等锁成功后再确认是否仍需刷新
-            if not force and cache.get(self._index_key(bitable_token)):
+            if not force and cache.get(self._index_key(bitable_token, table_id)):
                 return
             all_records = feishu.get_records(bitable_token, table_id)
             index = self._build_index(all_records, phone_field_name)
-            cache.set(self._index_key(bitable_token), index, ttl_seconds=self.CACHE_TTL)
+            cache.set(self._index_key(bitable_token, table_id), index, ttl_seconds=self.CACHE_TTL)
             logger.info(
                 f"缓存刷新完成: token={bitable_token}, "
                 f"记录={len(all_records)}, 手机号={len(index)}"
@@ -292,45 +296,45 @@ class RecordCache:
         except Exception as e:
             logger.warning(f"缓存刷新失败: token={bitable_token}, error={e}")
         finally:
-            lock_manager.release(self._lock_key(bitable_token), lock_token)
+            lock_manager.release(self._lock_key(bitable_token, table_id), lock_token)
 
     def refresh_after_miss(self, bitable_token: str, table_id: str, phone_field_name: str) -> bool:
         """
         缓存已有但手机号未命中时，最多每 MISS_REFRESH_COOLDOWN 秒刷新一次。
         避免输错手机号或未报名手机号反复触发全量拉取。
         """
-        if not self.has_index(bitable_token):
+        if not self.has_index(bitable_token, table_id):
             self.refresh(bitable_token, table_id, phone_field_name)
             return True
 
-        cooldown_key = self._miss_refresh_key(bitable_token)
+        cooldown_key = self._miss_refresh_key(bitable_token, table_id)
         if cache.get(cooldown_key):
             return False
         cache.set(cooldown_key, {"at": int(time.time())}, ttl_seconds=MISS_REFRESH_COOLDOWN)
         self.refresh(bitable_token, table_id, phone_field_name, force=True)
         return True
 
-    def has_index(self, bitable_token: str) -> bool:
-        return cache.get(self._index_key(bitable_token)) is not None
+    def has_index(self, bitable_token: str, table_id: str = "") -> bool:
+        return cache.get(self._index_key(bitable_token, table_id)) is not None
 
-    def records_count(self, bitable_token: str) -> int:
-        index = cache.get(self._index_key(bitable_token))
+    def records_count(self, bitable_token: str, table_id: str = "") -> int:
+        index = cache.get(self._index_key(bitable_token, table_id))
         if not index:
             return 0
         return sum(len(records) for records in index.values())
 
-    def find_by_phone(self, bitable_token: str, phone: str) -> Optional[dict]:
-        matches = self.find_all_by_phone(bitable_token, phone)
+    def find_by_phone(self, bitable_token: str, table_id: str, phone: str) -> Optional[dict]:
+        matches = self.find_all_by_phone(bitable_token, table_id, phone)
         return matches[0] if matches else None
 
-    def find_all_by_phone(self, bitable_token: str, phone: str) -> list:
-        index = cache.get(self._index_key(bitable_token))
+    def find_all_by_phone(self, bitable_token: str, table_id: str, phone: str) -> list:
+        index = cache.get(self._index_key(bitable_token, table_id))
         if not index:
             return []
         return self._find_all_in_index(index, phone)
 
-    def find_by_record_id(self, bitable_token: str, record_id: str) -> Optional[dict]:
-        index = cache.get(self._index_key(bitable_token))
+    def find_by_record_id(self, bitable_token: str, table_id: str, record_id: str) -> Optional[dict]:
+        index = cache.get(self._index_key(bitable_token, table_id))
         if not index:
             return None
         for records in index.values():
@@ -339,33 +343,52 @@ class RecordCache:
                     return record
         return None
 
-    def update_record_fields(self, bitable_token: str, phone: str, new_fields: dict):
+    def update_record_fields(self, bitable_token: str, table_id: str, phone: str, new_fields: dict):
         """
         签到成功后立即更新缓存中对应记录的字段。
         持锁保证与 refresh() 之间的可见性，防止并发覆盖索引。
         """
-        lock_token = lock_manager.acquire(self._lock_key(bitable_token), ttl_seconds=30, wait_timeout=5)
+        lock_token = lock_manager.acquire(self._lock_key(bitable_token, table_id), ttl_seconds=30, wait_timeout=5)
         if not lock_token:
             logger.warning(f"缓存更新锁获取失败: token={bitable_token}")
             return
         try:
-            index = cache.get(self._index_key(bitable_token))
+            index = cache.get(self._index_key(bitable_token, table_id))
             if not index:
                 return
             for record in self._find_all_in_index(index, phone):
                 if record and "fields" in record:
                     record["fields"].update(new_fields)
-            cache.set(self._index_key(bitable_token), index, ttl_seconds=self.CACHE_TTL)
+            cache.set(self._index_key(bitable_token, table_id), index, ttl_seconds=self.CACHE_TTL)
         finally:
-            lock_manager.release(self._lock_key(bitable_token), lock_token)
+            lock_manager.release(self._lock_key(bitable_token, table_id), lock_token)
 
-    def update_record_fields_by_id(self, bitable_token: str, record_id: str, new_fields: dict):
-        lock_token = lock_manager.acquire(self._lock_key(bitable_token), ttl_seconds=30, wait_timeout=5)
+    def upsert_records(self, bitable_token: str, table_id: str, phone_field_name: str, records: list):
+        if not records:
+            return
+        lock_token = lock_manager.acquire(self._lock_key(bitable_token, table_id), ttl_seconds=30, wait_timeout=5)
+        if not lock_token:
+            logger.warning(f"缓存合并锁获取失败: token={bitable_token}, table={table_id}")
+            return
+        try:
+            index = cache.get(self._index_key(bitable_token, table_id)) or {}
+            incoming = self._build_index(records, phone_field_name)
+            for phone_key, new_records in incoming.items():
+                by_id = {record.get("record_id"): record for record in index.get(phone_key, [])}
+                for record in new_records:
+                    by_id[record.get("record_id")] = record
+                index[phone_key] = list(by_id.values())
+            cache.set(self._index_key(bitable_token, table_id), index, ttl_seconds=self.CACHE_TTL)
+        finally:
+            lock_manager.release(self._lock_key(bitable_token, table_id), lock_token)
+
+    def update_record_fields_by_id(self, bitable_token: str, table_id: str, record_id: str, new_fields: dict):
+        lock_token = lock_manager.acquire(self._lock_key(bitable_token, table_id), ttl_seconds=30, wait_timeout=5)
         if not lock_token:
             logger.warning(f"缓存更新锁获取失败: token={bitable_token}")
             return
         try:
-            index = cache.get(self._index_key(bitable_token))
+            index = cache.get(self._index_key(bitable_token, table_id))
             if not index:
                 return
             updated = False
@@ -375,9 +398,9 @@ class RecordCache:
                         record["fields"].update(new_fields)
                         updated = True
             if updated:
-                cache.set(self._index_key(bitable_token), index, ttl_seconds=self.CACHE_TTL)
+                cache.set(self._index_key(bitable_token, table_id), index, ttl_seconds=self.CACHE_TTL)
         finally:
-            lock_manager.release(self._lock_key(bitable_token), lock_token)
+            lock_manager.release(self._lock_key(bitable_token, table_id), lock_token)
 
 
 record_cache = RecordCache()
@@ -448,19 +471,30 @@ class FeishuClient:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
-        response = httpx.request(
-            method=method,
-            url=f"{self.BASE_URL}{path}",
-            headers=headers,
-            timeout=timeout,
-            **kwargs,
-        )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("code") != 0:
+        for attempt in range(FEISHU_API_MAX_RETRIES + 1):
+            response = httpx.request(
+                method=method,
+                url=f"{self.BASE_URL}{path}",
+                headers=headers,
+                timeout=timeout,
+                **kwargs,
+            )
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt < FEISHU_API_MAX_RETRIES:
+                    retry_after = response.headers.get("Retry-After")
+                    try:
+                        delay = float(retry_after) if retry_after else FEISHU_API_RETRY_BASE_DELAY * (2 ** attempt)
+                    except ValueError:
+                        delay = FEISHU_API_RETRY_BASE_DELAY * (2 ** attempt)
+                    time.sleep(delay)
+                    continue
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") == 0:
+                return data.get("data", {})
             logger.error(f"飞书 API 错误: path={path}, code={data.get('code')}, msg={data.get('msg')}")
             raise Exception(data.get("msg", "API 请求失败"))
-        return data.get("data", {})
+        raise Exception("飞书 API 请求失败")
 
     def get_records(self, bitable_token: str, table_id: str, page_size: int = 500) -> list:
         """分页拉取全量记录，支持超过 500 条"""
@@ -475,6 +509,42 @@ class FeishuClient:
                 f"/bitable/v1/apps/{bitable_token}/tables/{table_id}/records",
                 timeout=30.0,
                 params=params,
+            )
+            all_items.extend(data.get("items", []))
+            if not data.get("has_more"):
+                break
+            page_token = data.get("page_token")
+        return all_items
+
+    def search_records_by_phone(
+        self, bitable_token: str, table_id: str, phone_field_name: str, phone: str, page_size: int = 100
+    ) -> list:
+        """按手机号精确补查，避免新报名用户因全量缓存未刷新而不可见。"""
+        all_items = []
+        page_token = None
+        normalized_phone = normalize_phone(phone)
+        payload = {
+            "filter": {
+                "conjunction": "and",
+                "conditions": [
+                    {
+                        "field_name": phone_field_name,
+                        "operator": "contains",
+                        "value": [normalized_phone],
+                    }
+                ],
+            }
+        }
+        while True:
+            params: dict = {"page_size": page_size}
+            if page_token:
+                params["page_token"] = page_token
+            data = self.api_request(
+                "POST",
+                f"/bitable/v1/apps/{bitable_token}/tables/{table_id}/records/search",
+                timeout=15.0,
+                params=params,
+                json=payload,
             )
             all_items.extend(data.get("items", []))
             if not data.get("has_more"):
@@ -645,7 +715,7 @@ def start_record_cache_preload(
     table_id: str,
     phone_field_name: str = "",
 ) -> bool:
-    if not bitable_token or not table_id or record_cache.has_index(bitable_token):
+    if not bitable_token or not table_id or record_cache.has_index(bitable_token, table_id):
         return False
 
     def _preload():
@@ -753,14 +823,15 @@ def cache_status():
     bitable_token = request.args.get("token", "").strip()
     if not bitable_token:
         return jsonify({"error": "请提供 ?token=xxx 参数"})
+    table_id = request.args.get("table", "").strip()
     config = get_cached_config(bitable_token)
-    index = cache.get(f"idx_{bitable_token}")
+    index = cache.get(record_cache._index_key(bitable_token, table_id))
     return jsonify({
         "ok": True,
         "cache_backend": "redis" if isinstance(cache, RedisCache) else "memory",
         "config_cached": bool(config and "fields" in config),
-        "records_cached": record_cache.has_index(bitable_token),
-        "records_count": record_cache.records_count(bitable_token),
+        "records_cached": record_cache.has_index(bitable_token, table_id),
+        "records_count": record_cache.records_count(bitable_token, table_id),
         "phone_keys_count": len(index) if index else 0,
         "config_keys": list(config.keys()) if config else [],
     })
@@ -795,7 +866,7 @@ def cache_preload():
         return jsonify({
             "success": True,
             "started": started,
-            "already_cached": not started and record_cache.has_index(bitable_token),
+            "already_cached": not started and record_cache.has_index(bitable_token, table_id),
             "table_id": table_id,
         })
     except Exception as e:
@@ -1090,13 +1161,23 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
         name_field_name = config.get("name_field_name")
         seat_field_name = config.get("seat_field_name")
 
-        # 查找报名记录：优先缓存索引；缓存已有但未命中时按冷却时间刷新，避免输错号反复全量拉取。
+        # 查找报名记录：优先缓存索引；未命中时按手机号精确补查飞书，避免新报名记录等待全量缓存刷新。
         matched_records = []
         if phone_field_name:
-            matched_records = record_cache.find_all_by_phone(bitable_token, phone)
+            matched_records = record_cache.find_all_by_phone(bitable_token, table_id, phone)
             if not matched_records:
-                record_cache.refresh_after_miss(bitable_token, table_id, phone_field_name)
-                matched_records = record_cache.find_all_by_phone(bitable_token, phone)
+                search_failed = False
+                try:
+                    fresh_records = feishu.search_records_by_phone(bitable_token, table_id, phone_field_name, phone)
+                    if fresh_records:
+                        record_cache.upsert_records(bitable_token, table_id, phone_field_name, fresh_records)
+                        matched_records = record_cache.find_all_by_phone(bitable_token, table_id, phone)
+                except Exception as e:
+                    search_failed = True
+                    logger.warning(f"手机号精确补查失败，回退缓存刷新: phone={phone}, error={e}")
+                if not matched_records and (search_failed or not record_cache.has_index(bitable_token, table_id)):
+                    record_cache.refresh_after_miss(bitable_token, table_id, phone_field_name)
+                    matched_records = record_cache.find_all_by_phone(bitable_token, table_id, phone)
 
         if not matched_records:
             result: dict = {
@@ -1167,7 +1248,7 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
         # 生产环境需确认飞书写入成功后再向用户返回签到成功。
         if update_fields:
             feishu.update_record(bitable_token, table_id, record_id, update_fields)
-            record_cache.update_record_fields_by_id(bitable_token, record_id, update_fields)
+            record_cache.update_record_fields_by_id(bitable_token, table_id, record_id, update_fields)
             logger.info(f"飞书记录已更新: record_id={record_id}")
 
         logger.info(f"签到成功: phone={phone}, record_id={record_id}")
