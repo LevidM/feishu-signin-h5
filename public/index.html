@@ -716,8 +716,10 @@
             title.textContent = d.table_name;
             footer.textContent = d.table_name;
           }
-          badge.className = 'status-badge show connected';
-          badge.textContent = '系统正常';
+          if (['localhost', '127.0.0.1'].includes(window.location.hostname)) {
+            badge.className = 'status-badge show connected';
+            badge.textContent = '系统正常';
+          }
         } else {
           badge.className = 'status-badge show disconnected';
           badge.textContent = d.message || '配置异常';
