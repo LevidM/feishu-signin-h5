@@ -73,6 +73,7 @@ CACHE_BACKEND = os.getenv("CACHE_BACKEND", "auto").strip().lower()
 CONFIG_CACHE_TTL = int(os.getenv("CONFIG_CACHE_TTL", "21600"))
 RECORD_CACHE_TTL = int(os.getenv("RECORD_CACHE_TTL", "21600"))
 MISS_REFRESH_COOLDOWN = int(os.getenv("MISS_REFRESH_COOLDOWN", "60"))
+VERIFY_CACHED_RECORDS = os.getenv("VERIFY_CACHED_RECORDS", "true").lower() == "true"
 FEISHU_API_MAX_RETRIES = int(os.getenv("FEISHU_API_MAX_RETRIES", "2"))
 FEISHU_API_RETRY_BASE_DELAY = float(os.getenv("FEISHU_API_RETRY_BASE_DELAY", "0.4"))
 API_RATE_LIMIT_MAX = int(os.getenv("API_RATE_LIMIT_MAX", "1200"))
@@ -411,6 +412,34 @@ class RecordCache:
                         record["fields"].update(new_fields)
                         updated = True
             if updated:
+                cache.set(self._index_key(bitable_token, table_id), index, ttl_seconds=self.CACHE_TTL)
+        finally:
+            lock_manager.release(self._lock_key(bitable_token, table_id), lock_token)
+
+    def remove_record_ids(self, bitable_token: str, table_id: str, record_ids: set):
+        if not record_ids:
+            return
+        lock_token = lock_manager.acquire(self._lock_key(bitable_token, table_id), ttl_seconds=30, wait_timeout=0.1)
+        if not lock_token:
+            logger.warning(f"缓存删除锁获取失败: token={bitable_token}")
+            return
+        try:
+            index = cache.get(self._index_key(bitable_token, table_id))
+            if not index:
+                return
+            changed = False
+            empty_phone_keys = []
+            for phone_key, records in index.items():
+                kept = [record for record in records if record.get("record_id") not in record_ids]
+                if len(kept) != len(records):
+                    changed = True
+                    if kept:
+                        index[phone_key] = kept
+                    else:
+                        empty_phone_keys.append(phone_key)
+            for phone_key in empty_phone_keys:
+                index.pop(phone_key, None)
+            if changed:
                 cache.set(self._index_key(bitable_token, table_id), index, ttl_seconds=self.CACHE_TTL)
         finally:
             lock_manager.release(self._lock_key(bitable_token, table_id), lock_token)
@@ -1301,6 +1330,37 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
             seat_field_name or "",
         )
 
+        def not_found_result():
+            result: dict = {
+                "status": "not_found",
+                "message": "未查询到您的报名信息，请检查手机号是否正确",
+            }
+            form_url = config.get("register_form_url", "")
+            if form_url:
+                result["register_form_url"] = form_url
+            return jsonify(result)
+
+        def sync_cached_matches_from_feishu(records: list) -> Tuple[list, bool]:
+            """用飞书精确查询结果校正当前手机号缓存，避免删除后的旧缓存继续生效。"""
+            if not phone_field_name or not records:
+                return records, False
+            fresh_records = feishu.search_records_by_phone(
+                bitable_token,
+                table_id,
+                phone_field_name,
+                phone,
+                field_names=signin_lookup_fields,
+            )
+            cached_ids = {record.get("record_id") for record in records if record.get("record_id")}
+            fresh_ids = {record.get("record_id") for record in fresh_records if record.get("record_id")}
+            stale_ids = cached_ids - fresh_ids
+            if stale_ids:
+                record_cache.remove_record_ids(bitable_token, table_id, stale_ids)
+                logger.info(f"已清理失效报名缓存: phone={phone}, stale_record_ids={list(stale_ids)}")
+            if fresh_records:
+                record_cache.upsert_records(bitable_token, table_id, phone_field_name, fresh_records)
+            return fresh_records, True
+
         # 查找报名记录：优先缓存索引；未命中时按手机号精确补查飞书，避免新报名记录等待全量缓存刷新。
         matched_records = []
         lookup_error = False
@@ -1331,20 +1391,27 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
                     f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
                 )
                 return error_response("报名数据正在同步，请稍后重试", 503)
-            result: dict = {
-                "status": "not_found",
-                "message": "未查询到您的报名信息，请检查手机号是否正确",
-            }
-            form_url = config.get("register_form_url", "")
-            if form_url:
-                result["register_form_url"] = form_url
             logger.info(
                 f"签到未命中: phone={phone}, table={table_id}, "
                 f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
             )
-            return jsonify(result)
+            return not_found_result()
 
         matched_record = None
+        if VERIFY_CACHED_RECORDS and (selected_record_id or len(matched_records) > 1):
+            try:
+                fresh_records, _ = sync_cached_matches_from_feishu(matched_records)
+                matched_records = fresh_records
+            except Exception as e:
+                logger.warning(f"缓存命中后飞书校验失败，继续使用缓存: phone={phone}, error={e}")
+
+        if not matched_records:
+            logger.info(
+                f"缓存报名记录已失效: phone={phone}, table={table_id}, "
+                f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
+            )
+            return not_found_result()
+
         if selected_record_id:
             matched_record = next(
                 (record for record in matched_records if record.get("record_id") == selected_record_id),
@@ -1379,7 +1446,45 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
         # 检查是否已签到
         if status_field_name and update_status:
             current_status = extract_status_value(record_fields.get(status_field_name))
-            if current_status in ("已签到", "已签到 "):
+            if VERIFY_CACHED_RECORDS and current_status in ("已签到", "已签到 "):
+                try:
+                    fresh_records, _ = sync_cached_matches_from_feishu([matched_record])
+                    fresh_record = next(
+                        (record for record in fresh_records if record.get("record_id") == record_id),
+                        None,
+                    )
+                    if not fresh_record:
+                        logger.info(
+                            f"缓存已签到记录已删除: phone={phone}, record_id={record_id}, "
+                            f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
+                        )
+                        return not_found_result()
+                    matched_record = fresh_record
+                    record_fields = matched_record.get("fields", {})
+                    current_status = extract_status_value(record_fields.get(status_field_name))
+                    if current_status not in ("已签到", "已签到 "):
+                        logger.info(f"缓存签到状态已校正: phone={phone}, record_id={record_id}")
+                except Exception as e:
+                    logger.warning(f"已签到缓存校验失败，继续使用缓存: phone={phone}, record_id={record_id}, error={e}")
+                    current_status = "已签到"
+                if current_status in ("已签到", "已签到 "):
+                    first_time = ""
+                    if time_field_name:
+                        ts = record_fields.get(time_field_name)
+                        if isinstance(ts, (int, float)):
+                            first_time = format_timestamp(int(ts))
+                    logger.info(
+                        f"重复签到: phone={phone}, record_id={record_id}, "
+                        f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
+                    )
+                    return jsonify({
+                        "status": "already",
+                        "message": already_msg,
+                        "name": extract_name_value(record_fields.get(name_field_name)) if name_field_name and return_name else None,
+                        "seat": extract_name_value(record_fields.get(seat_field_name)) if seat_field_name and return_seat else None,
+                        "first_signin_time": first_time,
+                    })
+            elif current_status in ("已签到", "已签到 "):
                 first_time = ""
                 if time_field_name:
                     ts = record_fields.get(time_field_name)
@@ -1405,8 +1510,42 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
             update_fields[time_field_name] = int(datetime.now().timestamp() * 1000)
 
         # 生产环境需确认飞书写入成功后再向用户返回签到成功。
-        if update_fields:
-            feishu.update_record(bitable_token, table_id, record_id, update_fields)
+        if VERIFY_CACHED_RECORDS and not update_fields:
+            try:
+                fresh_records, _ = sync_cached_matches_from_feishu([matched_record])
+                fresh_record = next(
+                    (record for record in fresh_records if record.get("record_id") == record_id),
+                    None,
+                )
+                if not fresh_record:
+                    logger.info(
+                        f"返回成功前报名记录已删除: phone={phone}, record_id={record_id}, "
+                        f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
+                    )
+                    return not_found_result()
+                matched_record = fresh_record
+                record_fields = matched_record.get("fields", {})
+            except Exception as e:
+                logger.warning(f"无写入字段时校验报名记录失败，继续使用缓存: phone={phone}, record_id={record_id}, error={e}")
+        elif update_fields:
+            try:
+                feishu.update_record(bitable_token, table_id, record_id, update_fields)
+            except Exception as e:
+                try:
+                    fresh_records, _ = sync_cached_matches_from_feishu([matched_record])
+                    fresh_record_ids = {record.get("record_id") for record in fresh_records}
+                    if record_id not in fresh_record_ids:
+                        logger.info(
+                            f"写入前报名记录已删除: phone={phone}, record_id={record_id}, "
+                            f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
+                        )
+                        return not_found_result()
+                except Exception as lookup_exception:
+                    logger.warning(
+                        f"写入失败后校验报名记录失败: phone={phone}, record_id={record_id}, "
+                        f"write_error={e}, lookup_error={lookup_exception}"
+                    )
+                raise
             record_cache.update_record_fields_by_id(bitable_token, table_id, record_id, update_fields)
             logger.info(f"飞书记录已更新: record_id={record_id}")
 
