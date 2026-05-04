@@ -82,6 +82,7 @@ FEISHU_HTTP_MAX_CONNECTIONS = int(os.getenv("FEISHU_HTTP_MAX_CONNECTIONS", "50")
 FEISHU_HTTP_MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("FEISHU_HTTP_MAX_KEEPALIVE_CONNECTIONS", "20"))
 FEISHU_SEARCH_TIMEOUT = float(os.getenv("FEISHU_SEARCH_TIMEOUT", "2.0"))
 FEISHU_WRITE_TIMEOUT = float(os.getenv("FEISHU_WRITE_TIMEOUT", "3.0"))
+FEISHU_TOKEN_INVALID_CODES = {"99991663", "99991664", "99991668"}
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
@@ -497,6 +498,10 @@ def is_feishu_not_found_error(error: Exception) -> bool:
     return False
 
 
+def is_feishu_token_invalid(status_code: int, code) -> bool:
+    return status_code == 401 or str(code) in FEISHU_TOKEN_INVALID_CODES
+
+
 class FeishuClient:
     """飞书 Open API 客户端，线程安全"""
 
@@ -538,13 +543,19 @@ class FeishuClient:
             self._token_cache = (token, datetime.now() + timedelta(seconds=expires_in))
             return token
 
+    def invalidate_app_access_token(self):
+        with self._token_lock:
+            self._token_cache = None
+
     def api_request(self, method: str, path: str, timeout: float = 10.0, **kwargs) -> dict:
-        token = self.get_app_access_token()
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-        for attempt in range(FEISHU_API_MAX_RETRIES + 1):
+        refreshed_token = False
+        attempt = 0
+        while attempt <= FEISHU_API_MAX_RETRIES:
+            token = self.get_app_access_token()
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            }
             response = self._client.request(
                 method=method,
                 url=f"{self.BASE_URL}{path}",
@@ -553,24 +564,36 @@ class FeishuClient:
                 **kwargs,
             )
             if response.status_code == 429 or response.status_code >= 500:
-                if attempt < FEISHU_API_MAX_RETRIES:
-                    retry_after = response.headers.get("Retry-After")
-                    try:
-                        delay = float(retry_after) if retry_after else FEISHU_API_RETRY_BASE_DELAY * (2 ** attempt)
-                    except ValueError:
-                        delay = FEISHU_API_RETRY_BASE_DELAY * (2 ** attempt)
-                    time.sleep(delay)
-                    continue
+                if attempt >= FEISHU_API_MAX_RETRIES:
+                    response.raise_for_status()
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after else FEISHU_API_RETRY_BASE_DELAY * (2 ** attempt)
+                except ValueError:
+                    delay = FEISHU_API_RETRY_BASE_DELAY * (2 ** attempt)
+                attempt += 1
+                time.sleep(delay)
+                continue
             try:
                 data = response.json()
             except Exception:
                 data = {}
+            if is_feishu_token_invalid(response.status_code, data.get("code")) and not refreshed_token:
+                logger.warning(f"飞书 token 失效，刷新后重试: path={path}, code={data.get('code')}")
+                self.invalidate_app_access_token()
+                refreshed_token = True
+                continue
             if response.status_code >= 400:
                 msg = data.get("msg") or response.text or "HTTP 请求失败"
                 logger.error(f"飞书 HTTP 错误: path={path}, status={response.status_code}, msg={msg}")
                 raise FeishuApiError(msg, code=data.get("code"), status_code=response.status_code)
             if data.get("code") == 0:
                 return data.get("data", {})
+            if is_feishu_token_invalid(response.status_code, data.get("code")) and not refreshed_token:
+                logger.warning(f"飞书 token 失效，刷新后重试: path={path}, code={data.get('code')}")
+                self.invalidate_app_access_token()
+                refreshed_token = True
+                continue
             logger.error(f"飞书 API 错误: path={path}, code={data.get('code')}, msg={data.get('msg')}")
             raise FeishuApiError(data.get("msg", "API 请求失败"), code=data.get("code"), status_code=response.status_code)
         raise FeishuApiError("飞书 API 请求失败")
