@@ -703,28 +703,27 @@
         return;
       }
 
-      if (TOKEN) {
-        try {
-          const body = { bitable_token: TOKEN };
-          if (TABLE) body.table_id = TABLE;
-          const res = await fetch(API + '/api/config', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-          });
-          const d = await res.json();
-          if (d.success && d.table_name) {
+      try {
+        const body = { bitable_token: TOKEN };
+        if (TABLE) body.table_id = TABLE;
+        const res = await fetch(API + '/api/config', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const d = await res.json();
+        if (d.success) {
+          if (d.table_name) {
             title.textContent = d.table_name;
             footer.textContent = d.table_name;
           }
-        } catch (e) { console.error(e); }
-      }
-
-      try {
-        const res = await fetch(API + '/health');
-        const d = await res.json();
-        badge.className = 'status-badge show connected';
-        badge.textContent = '系统正常';
-      } catch {
+          badge.className = 'status-badge show connected';
+          badge.textContent = '系统正常';
+        } else {
+          badge.className = 'status-badge show disconnected';
+          badge.textContent = d.message || '配置异常';
+        }
+      } catch (e) {
+        console.error(e);
         badge.className = 'status-badge show disconnected';
         badge.textContent = '连接异常';
       }

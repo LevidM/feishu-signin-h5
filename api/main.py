@@ -75,6 +75,12 @@ RECORD_CACHE_TTL = int(os.getenv("RECORD_CACHE_TTL", "21600"))
 MISS_REFRESH_COOLDOWN = int(os.getenv("MISS_REFRESH_COOLDOWN", "60"))
 FEISHU_API_MAX_RETRIES = int(os.getenv("FEISHU_API_MAX_RETRIES", "2"))
 FEISHU_API_RETRY_BASE_DELAY = float(os.getenv("FEISHU_API_RETRY_BASE_DELAY", "0.4"))
+API_RATE_LIMIT_MAX = int(os.getenv("API_RATE_LIMIT_MAX", "1200"))
+API_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("API_RATE_LIMIT_WINDOW_SECONDS", "60"))
+FEISHU_HTTP_MAX_CONNECTIONS = int(os.getenv("FEISHU_HTTP_MAX_CONNECTIONS", "50"))
+FEISHU_HTTP_MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("FEISHU_HTTP_MAX_KEEPALIVE_CONNECTIONS", "20"))
+FEISHU_SEARCH_TIMEOUT = float(os.getenv("FEISHU_SEARCH_TIMEOUT", "2.0"))
+FEISHU_WRITE_TIMEOUT = float(os.getenv("FEISHU_WRITE_TIMEOUT", "3.0"))
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
@@ -273,7 +279,14 @@ class RecordCache:
                         matches.append(item)
         return matches
 
-    def refresh(self, bitable_token: str, table_id: str, phone_field_name: str, force: bool = False):
+    def refresh(
+        self,
+        bitable_token: str,
+        table_id: str,
+        phone_field_name: str,
+        force: bool = False,
+        field_names: Optional[list] = None,
+    ):
         """
         全量拉取并重建索引。
         持锁期间若其他线程已刷新完成，直接返回，避免重复拉取（雷劈效应）。
@@ -286,7 +299,7 @@ class RecordCache:
             # double-check：等锁成功后再确认是否仍需刷新
             if not force and cache.get(self._index_key(bitable_token, table_id)):
                 return
-            all_records = feishu.get_records(bitable_token, table_id)
+            all_records = feishu.get_records(bitable_token, table_id, field_names=field_names)
             index = self._build_index(all_records, phone_field_name)
             cache.set(self._index_key(bitable_token, table_id), index, ttl_seconds=self.CACHE_TTL)
             logger.info(
@@ -348,7 +361,7 @@ class RecordCache:
         签到成功后立即更新缓存中对应记录的字段。
         持锁保证与 refresh() 之间的可见性，防止并发覆盖索引。
         """
-        lock_token = lock_manager.acquire(self._lock_key(bitable_token, table_id), ttl_seconds=30, wait_timeout=5)
+        lock_token = lock_manager.acquire(self._lock_key(bitable_token, table_id), ttl_seconds=30, wait_timeout=0.1)
         if not lock_token:
             logger.warning(f"缓存更新锁获取失败: token={bitable_token}")
             return
@@ -366,7 +379,7 @@ class RecordCache:
     def upsert_records(self, bitable_token: str, table_id: str, phone_field_name: str, records: list):
         if not records:
             return
-        lock_token = lock_manager.acquire(self._lock_key(bitable_token, table_id), ttl_seconds=30, wait_timeout=5)
+        lock_token = lock_manager.acquire(self._lock_key(bitable_token, table_id), ttl_seconds=30, wait_timeout=0.1)
         if not lock_token:
             logger.warning(f"缓存合并锁获取失败: token={bitable_token}, table={table_id}")
             return
@@ -383,7 +396,7 @@ class RecordCache:
             lock_manager.release(self._lock_key(bitable_token, table_id), lock_token)
 
     def update_record_fields_by_id(self, bitable_token: str, table_id: str, record_id: str, new_fields: dict):
-        lock_token = lock_manager.acquire(self._lock_key(bitable_token, table_id), ttl_seconds=30, wait_timeout=5)
+        lock_token = lock_manager.acquire(self._lock_key(bitable_token, table_id), ttl_seconds=30, wait_timeout=0.1)
         if not lock_token:
             logger.warning(f"缓存更新锁获取失败: token={bitable_token}")
             return
@@ -417,6 +430,14 @@ class RateLimiter:
         self._lock = Lock()
 
     def is_allowed(self, key: str) -> bool:
+        if isinstance(cache, RedisCache):
+            window_id = int(time.time() // self.window_seconds)
+            redis_key = f"feishu_signin:rate:{key}:{window_id}"
+            count = cache.client.incr(redis_key)
+            if count == 1:
+                cache.client.expire(redis_key, self.window_seconds + 5)
+            return count <= self.max_requests
+
         now = time.time()
         window_start = now - self.window_seconds
         with self._lock:
@@ -427,7 +448,7 @@ class RateLimiter:
             return True
 
 
-rate_limiter = RateLimiter(max_requests=300, window_seconds=60)
+rate_limiter = RateLimiter(max_requests=API_RATE_LIMIT_MAX, window_seconds=API_RATE_LIMIT_WINDOW_SECONDS)
 
 # ==================== 飞书 API 客户端 ====================
 
@@ -442,6 +463,13 @@ class FeishuClient:
         self.app_secret = app_secret
         self._token_cache: Optional[Tuple[str, datetime]] = None
         self._token_lock = Lock()  # 防止并发时重复刷新 token
+        self._client = httpx.Client(
+            limits=httpx.Limits(
+                max_connections=FEISHU_HTTP_MAX_CONNECTIONS,
+                max_keepalive_connections=FEISHU_HTTP_MAX_KEEPALIVE_CONNECTIONS,
+            ),
+            timeout=30.0,
+        )
 
     def get_app_access_token(self) -> str:
         with self._token_lock:
@@ -450,7 +478,7 @@ class FeishuClient:
                 if datetime.now() < expires_at - timedelta(minutes=5):
                     return token
 
-            response = httpx.post(
+            response = self._client.post(
                 self.TOKEN_URL,
                 json={"app_id": self.app_id, "app_secret": self.app_secret},
                 timeout=30.0,
@@ -472,7 +500,7 @@ class FeishuClient:
             "Content-Type": "application/json",
         }
         for attempt in range(FEISHU_API_MAX_RETRIES + 1):
-            response = httpx.request(
+            response = self._client.request(
                 method=method,
                 url=f"{self.BASE_URL}{path}",
                 headers=headers,
@@ -496,14 +524,37 @@ class FeishuClient:
             raise Exception(data.get("msg", "API 请求失败"))
         raise Exception("飞书 API 请求失败")
 
-    def get_records(self, bitable_token: str, table_id: str, page_size: int = 500) -> list:
+    def get_records(
+        self,
+        bitable_token: str,
+        table_id: str,
+        page_size: int = 500,
+        field_names: Optional[list] = None,
+    ) -> list:
         """分页拉取全量记录，支持超过 500 条"""
+        try:
+            return self._get_records_page_loop(bitable_token, table_id, page_size, field_names)
+        except Exception:
+            if field_names:
+                logger.warning("飞书记录列表字段裁剪失败，降级为全字段拉取")
+                return self._get_records_page_loop(bitable_token, table_id, page_size, None)
+            raise
+
+    def _get_records_page_loop(
+        self,
+        bitable_token: str,
+        table_id: str,
+        page_size: int,
+        field_names: Optional[list],
+    ) -> list:
         all_items = []
         page_token = None
         while True:
             params: dict = {"page_size": page_size}
             if page_token:
                 params["page_token"] = page_token
+            if field_names:
+                params["field_names"] = json.dumps(field_names, ensure_ascii=False)
             data = self.api_request(
                 "GET",
                 f"/bitable/v1/apps/{bitable_token}/tables/{table_id}/records",
@@ -517,9 +568,36 @@ class FeishuClient:
         return all_items
 
     def search_records_by_phone(
-        self, bitable_token: str, table_id: str, phone_field_name: str, phone: str, page_size: int = 100
+        self,
+        bitable_token: str,
+        table_id: str,
+        phone_field_name: str,
+        phone: str,
+        page_size: int = 20,
+        field_names: Optional[list] = None,
     ) -> list:
         """按手机号精确补查，避免新报名用户因全量缓存未刷新而不可见。"""
+        try:
+            return self._search_records_by_phone_page_loop(
+                bitable_token, table_id, phone_field_name, phone, page_size, field_names
+            )
+        except Exception:
+            if field_names:
+                logger.warning("飞书记录搜索字段裁剪失败，降级为全字段搜索")
+                return self._search_records_by_phone_page_loop(
+                    bitable_token, table_id, phone_field_name, phone, page_size, None
+                )
+            raise
+
+    def _search_records_by_phone_page_loop(
+        self,
+        bitable_token: str,
+        table_id: str,
+        phone_field_name: str,
+        phone: str,
+        page_size: int,
+        field_names: Optional[list],
+    ) -> list:
         all_items = []
         page_token = None
         normalized_phone = normalize_phone(phone)
@@ -539,10 +617,12 @@ class FeishuClient:
             params: dict = {"page_size": page_size}
             if page_token:
                 params["page_token"] = page_token
+            if field_names:
+                params["field_names"] = json.dumps(field_names, ensure_ascii=False)
             data = self.api_request(
                 "POST",
                 f"/bitable/v1/apps/{bitable_token}/tables/{table_id}/records/search",
-                timeout=15.0,
+                timeout=FEISHU_SEARCH_TIMEOUT,
                 params=params,
                 json=payload,
             )
@@ -558,6 +638,7 @@ class FeishuClient:
         return self.api_request(
             "PUT",
             f"/bitable/v1/apps/{bitable_token}/tables/{table_id}/records/{record_id}",
+            timeout=FEISHU_WRITE_TIMEOUT,
             json={"fields": fields},
         )
 
@@ -618,8 +699,9 @@ def is_valid_phone(phone: str) -> bool:
     return bool(re.fullmatch(r"\+?\d{7,15}", normalized))
 
 
-def signin_lock_key(bitable_token: str, phone: str) -> str:
-    return f"signin:{bitable_token}:{normalize_phone(phone)}"
+def signin_lock_key(bitable_token: str, table_id: str, phone: str) -> str:
+    table_part = table_id or "_auto"
+    return f"signin:{bitable_token}:{table_part}:{normalize_phone(phone)}"
 
 
 def generate_signin_url(bitable_token: str) -> str:
@@ -628,12 +710,24 @@ def generate_signin_url(bitable_token: str) -> str:
     return f"{SIGNIN_BASE_URL}/?app={bitable_token}"
 
 
-def get_cached_config(bitable_token: str) -> Optional[dict]:
-    return cache.get(f"config_{bitable_token}")
+def _config_key(bitable_token: str, table_id: str = "") -> str:
+    return f"config_{bitable_token}:{table_id}" if table_id else f"config_{bitable_token}"
 
 
-def set_cached_config(bitable_token: str, config: dict):
-    cache.set(f"config_{bitable_token}", config, ttl_seconds=CONFIG_CACHE_TTL)
+def get_cached_config(bitable_token: str, table_id: str = "") -> Optional[dict]:
+    if table_id:
+        scoped_config = cache.get(_config_key(bitable_token, table_id))
+        if scoped_config:
+            return scoped_config
+        legacy_config = cache.get(_config_key(bitable_token))
+        if legacy_config and legacy_config.get("table_id") == table_id:
+            return legacy_config
+        return None
+    return cache.get(_config_key(bitable_token))
+
+
+def set_cached_config(bitable_token: str, config: dict, table_id: str = ""):
+    cache.set(_config_key(bitable_token, table_id), config, ttl_seconds=CONFIG_CACHE_TTL)
 
 
 def extract_phone_values(value) -> list:
@@ -700,6 +794,16 @@ def error_response(message: str, status_code: int = 400):
     return jsonify({"status": "error", "message": message}), status_code
 
 
+def compact_field_names(*field_names: str) -> list:
+    result = []
+    seen = set()
+    for field_name in field_names:
+        if field_name and field_name not in seen:
+            seen.add(field_name)
+            result.append(field_name)
+    return result
+
+
 def build_candidate(record: dict, name_field_name: str, seat_field_name: str, status_field_name: str) -> dict:
     fields = record.get("fields", {})
     return {
@@ -714,6 +818,7 @@ def start_record_cache_preload(
     bitable_token: str,
     table_id: str,
     phone_field_name: str = "",
+    field_names: Optional[list] = None,
 ) -> bool:
     if not bitable_token or not table_id or record_cache.has_index(bitable_token, table_id):
         return False
@@ -727,7 +832,7 @@ def start_record_cache_preload(
             if not resolved_phone_field:
                 logger.warning(f"缓存预热跳过，未找到手机号字段: token={bitable_token}, table={table_id}")
                 return
-            record_cache.refresh(bitable_token, table_id, resolved_phone_field)
+            record_cache.refresh(bitable_token, table_id, resolved_phone_field, field_names=field_names)
         except Exception as e:
             logger.warning(f"缓存预热失败: token={bitable_token}, table={table_id}, error={e}")
 
@@ -824,7 +929,7 @@ def cache_status():
     if not bitable_token:
         return jsonify({"error": "请提供 ?token=xxx 参数"})
     table_id = request.args.get("table", "").strip()
-    config = get_cached_config(bitable_token)
+    config = get_cached_config(bitable_token, table_id) if table_id else get_cached_config(bitable_token)
     index = cache.get(record_cache._index_key(bitable_token, table_id))
     return jsonify({
         "ok": True,
@@ -850,7 +955,11 @@ def cache_preload():
 
     try:
         request_table_id = data.get("table_id", "").strip()
-        config = get_cached_config(bitable_token) or {}
+        config = (
+            get_cached_config(bitable_token, request_table_id)
+            if request_table_id
+            else get_cached_config(bitable_token)
+        ) or {}
         table_id = request_table_id or config.get("table_id", "")
         if not table_id:
             table_id, _ = find_signin_table(bitable_token)
@@ -862,7 +971,14 @@ def cache_preload():
         if not phone_field_name:
             return error_response("未找到手机号字段，无法预热缓存", 400)
 
-        started = start_record_cache_preload(bitable_token, table_id, phone_field_name)
+        preload_fields = compact_field_names(
+            phone_field_name,
+            config.get("status_field_name", ""),
+            config.get("time_field_name", ""),
+            config.get("name_field_name", ""),
+            config.get("seat_field_name", ""),
+        )
+        started = start_record_cache_preload(bitable_token, table_id, phone_field_name, preload_fields)
         return jsonify({
             "success": True,
             "started": started,
@@ -918,7 +1034,7 @@ def plugin_register():
         if signin_config:
             cache_data["signin_config"] = signin_config
         if cache_data:
-            set_cached_config(bitable_token, cache_data)
+            set_cached_config(bitable_token, cache_data, table_id)
             logger.info(f"缓存签到配置: token={bitable_token}")
 
         if table_id:
@@ -937,6 +1053,7 @@ def plugin_register():
 
 
 @app.route("/api/config", methods=["POST"])
+@rate_limit_check()
 def get_config():
     """
     【前端获取配置】
@@ -955,13 +1072,21 @@ def get_config():
 
     try:
         request_table_id = data.get("table_id", "").strip()
-        config = get_cached_config(bitable_token)
+        config = get_cached_config(bitable_token, request_table_id) if request_table_id else get_cached_config(bitable_token)
 
         if config and "fields" in config:
+            preload_fields = compact_field_names(
+                config.get("phone_field_name", ""),
+                config.get("status_field_name", ""),
+                config.get("time_field_name", ""),
+                config.get("name_field_name", ""),
+                config.get("seat_field_name", ""),
+            )
             start_record_cache_preload(
                 bitable_token,
                 config.get("table_id", ""),
                 config.get("phone_field_name", ""),
+                preload_fields,
             )
             return jsonify({
                 "success": True,
@@ -1038,8 +1163,15 @@ def get_config():
             "seat_field_id": seat_field_id,
             "seat_field_name": seat_field_name,
         })
-        set_cached_config(bitable_token, cached_config)
-        start_record_cache_preload(bitable_token, table_id, phone_field_name or "")
+        set_cached_config(bitable_token, cached_config, table_id if request_table_id else "")
+        preload_fields = compact_field_names(
+            phone_field_name or "",
+            status_field_name or "",
+            time_field_name or "",
+            name_field_name or "",
+            seat_field_name or "",
+        )
+        start_record_cache_preload(bitable_token, table_id, phone_field_name or "", preload_fields)
 
         return jsonify(response_data)
     except Exception as e:
@@ -1077,7 +1209,7 @@ def signin():
     selected_record_id = data.get("record_id", "").strip()
 
     # 同一手机号并发签到防重：Redis 分布式锁可覆盖多个 gunicorn worker。
-    lock_key = signin_lock_key(bitable_token, phone)
+    lock_key = signin_lock_key(bitable_token, request_table_id, phone)
     lock_token = lock_manager.acquire(lock_key, ttl_seconds=120, wait_timeout=0)
     if not lock_token:
         return error_response("签到请求处理中，请勿重复提交", 429)
@@ -1089,8 +1221,9 @@ def signin():
 
 def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_record_id: str = ""):
     """签到核心逻辑（调用方已持 signin_lock）"""
+    started_at = time.perf_counter()
     try:
-        config = get_cached_config(bitable_token)
+        config = get_cached_config(bitable_token, request_table_id) if request_table_id else get_cached_config(bitable_token)
 
         if not config or "fields" not in config:
             # 优先级：请求参数 > 插件缓存 > 自动检测
@@ -1152,7 +1285,7 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
                 if form_url:
                     config["register_form_url"] = form_url
 
-            set_cached_config(bitable_token, config)
+            set_cached_config(bitable_token, config, table_id if request_table_id else "")
 
         table_id = config["table_id"]
         phone_field_name = config.get("phone_field_name")
@@ -1160,26 +1293,44 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
         time_field_name = config.get("time_field_name")
         name_field_name = config.get("name_field_name")
         seat_field_name = config.get("seat_field_name")
+        signin_lookup_fields = compact_field_names(
+            phone_field_name or "",
+            status_field_name or "",
+            time_field_name or "",
+            name_field_name or "",
+            seat_field_name or "",
+        )
 
         # 查找报名记录：优先缓存索引；未命中时按手机号精确补查飞书，避免新报名记录等待全量缓存刷新。
         matched_records = []
+        lookup_error = False
         if phone_field_name:
             matched_records = record_cache.find_all_by_phone(bitable_token, table_id, phone)
             if not matched_records:
-                search_failed = False
                 try:
-                    fresh_records = feishu.search_records_by_phone(bitable_token, table_id, phone_field_name, phone)
+                    fresh_records = feishu.search_records_by_phone(
+                        bitable_token,
+                        table_id,
+                        phone_field_name,
+                        phone,
+                        field_names=signin_lookup_fields,
+                    )
                     if fresh_records:
                         record_cache.upsert_records(bitable_token, table_id, phone_field_name, fresh_records)
-                        matched_records = record_cache.find_all_by_phone(bitable_token, table_id, phone)
+                        matched_records = record_cache.find_all_by_phone(bitable_token, table_id, phone) or fresh_records
                 except Exception as e:
-                    search_failed = True
-                    logger.warning(f"手机号精确补查失败，回退缓存刷新: phone={phone}, error={e}")
-                if not matched_records and (search_failed or not record_cache.has_index(bitable_token, table_id)):
-                    record_cache.refresh_after_miss(bitable_token, table_id, phone_field_name)
-                    matched_records = record_cache.find_all_by_phone(bitable_token, table_id, phone)
+                    lookup_error = True
+                    logger.warning(f"手机号精确补查失败: phone={phone}, error={e}")
+                if not matched_records and (lookup_error or not record_cache.has_index(bitable_token, table_id)):
+                    start_record_cache_preload(bitable_token, table_id, phone_field_name, signin_lookup_fields)
 
         if not matched_records:
+            if lookup_error and not record_cache.has_index(bitable_token, table_id):
+                logger.warning(
+                    f"签到查询失败且无缓存: phone={phone}, table={table_id}, "
+                    f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
+                )
+                return error_response("报名数据正在同步，请稍后重试", 503)
             result: dict = {
                 "status": "not_found",
                 "message": "未查询到您的报名信息，请检查手机号是否正确",
@@ -1187,6 +1338,10 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
             form_url = config.get("register_form_url", "")
             if form_url:
                 result["register_form_url"] = form_url
+            logger.info(
+                f"签到未命中: phone={phone}, table={table_id}, "
+                f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
+            )
             return jsonify(result)
 
         matched_record = None
@@ -1230,6 +1385,10 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
                     ts = record_fields.get(time_field_name)
                     if isinstance(ts, (int, float)):
                         first_time = format_timestamp(int(ts))
+                logger.info(
+                    f"重复签到: phone={phone}, record_id={record_id}, "
+                    f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
+                )
                 return jsonify({
                     "status": "already",
                     "message": already_msg,
@@ -1251,7 +1410,10 @@ def _do_signin(phone: str, bitable_token: str, request_table_id: str, selected_r
             record_cache.update_record_fields_by_id(bitable_token, table_id, record_id, update_fields)
             logger.info(f"飞书记录已更新: record_id={record_id}")
 
-        logger.info(f"签到成功: phone={phone}, record_id={record_id}")
+        logger.info(
+            f"签到成功: phone={phone}, record_id={record_id}, "
+            f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
+        )
         return jsonify({
             "status": "success",
             "message": success_msg,
